@@ -26,6 +26,7 @@ let pollFails = 0;
 let polling = false;
 let lastMeta = "";
 let tabKey = "Tab";
+let padKeys = [];                 // keys that are controller buttons while browsing (the page doesn't get them)
 let lastFs = false;               // the window in LibreWolf's own full screen (F11, a video's full screen button)               // the key (KeyboardEvent.code) for the next tab
 const handled = new Set();
 
@@ -141,6 +142,7 @@ async function handleBoot(tab) {
   } catch (e) {}
   if (!job) return; // a stale bootstrap tab the app is no longer waiting for
   if (typeof job.tabKey === "string") tabKey = job.tabKey;
+  if (Array.isArray(job.padKeys)) padKeys = job.padKeys;
 
   xmbWindowId = tab.windowId;
   try {
@@ -248,12 +250,14 @@ async function poll() {
     const r = await fetch(API + "/xmb/poll", { cache: "no-store" });
     const d = await r.json();
     pollFails = 0;
-    if (typeof d.tabKey === "string" && d.tabKey !== tabKey) {
-      tabKey = d.tabKey;
+    const pk = Array.isArray(d.padKeys) ? d.padKeys : padKeys;
+    if ((typeof d.tabKey === "string" && d.tabKey !== tabKey) || String(pk) !== String(padKeys)) {
+      if (typeof d.tabKey === "string") tabKey = d.tabKey;
+      padKeys = pk;
       if (xmbWindowId != null) {
         try {
           for (const t of await browser.tabs.query({ windowId: xmbWindowId })) {
-            browser.tabs.sendMessage(t.id, { type: "xmb-key", tabKey }).catch(() => {});
+            browser.tabs.sendMessage(t.id, { type: "xmb-key", tabKey, padKeys }).catch(() => {});
           }
         } catch (e) {}
       }
@@ -306,7 +310,7 @@ browser.tabs.onCreated.addListener(async (tab) => {
 
 browser.tabs.onAttached.addListener((tabId, info) => {
   if (info.newWindowId === xmbWindowId) {
-    browser.tabs.sendMessage(tabId, { type: "xmb-on", tabKey }).catch(() => {});
+    browser.tabs.sendMessage(tabId, { type: "xmb-on", tabKey, padKeys }).catch(() => {});
   }
 });
 
@@ -325,7 +329,7 @@ browser.runtime.onMessage.addListener((m, sender) => {
   if (!m || !m.type) return;
   const tab = sender.tab;
   const inXmb = !!tab && xmbWindowId != null && tab.windowId === xmbWindowId;
-  if (m.type === "hello") return Promise.resolve({ xmb: inXmb, tabKey });
+  if (m.type === "hello") return Promise.resolve({ xmb: inXmb, tabKey, padKeys });
   if (!inXmb) return;
   if (m.type === "nexttab") { runCmd({ cmd: "nexttab" }); return; }
   if (m.type === "focus") {

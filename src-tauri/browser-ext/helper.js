@@ -18,6 +18,7 @@
   var api = typeof browser !== "undefined" ? browser : chrome;
   var on = false;
   var tabKey = "Tab";   // switches to the next tab (left to right, then around)
+  var padKeys = [];     // keys that are controller buttons while browsing (the app reads them)
 
   function send(msg) {
     try { var p = api.runtime.sendMessage(msg); if (p && p.catch) p.catch(function () {}); } catch (e) {}
@@ -27,13 +28,17 @@
     api.runtime.sendMessage({ type: "hello" }).then(function (r) {
       on = !!(r && r.xmb);
       if (r && typeof r.tabKey === "string") tabKey = r.tabKey;
+      if (r && Array.isArray(r.padKeys)) padKeys = r.padKeys;
     }, function () {});
   } catch (e) {}
 
   api.runtime.onMessage.addListener(function (m) {
     if (!m) return;
-    if (m.type === "xmb-on") { on = true; if (typeof m.tabKey === "string") tabKey = m.tabKey; }
-    else if (m.type === "xmb-key") { if (typeof m.tabKey === "string") tabKey = m.tabKey; }
+    if (m.type === "xmb-on" || m.type === "xmb-key") {
+      if (m.type === "xmb-on") on = true;
+      if (typeof m.tabKey === "string") tabKey = m.tabKey;
+      if (Array.isArray(m.padKeys)) padKeys = m.padKeys;
+    }
     else if (m.type === "xmb-type" && on) doType(m);
   });
 
@@ -42,6 +47,17 @@
     if (!on || !tabKey || e.code !== tabKey || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
     // (the app reads the key itself and changes the tab: here the page is
     // only kept from moving its focus to the next link / field)
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
+
+  // ---- keys that are controller buttons: the app reads them while browsing
+  // (Cross = click, Circle = close the tab, the stick keys move the pointer...),
+  // so the page doesn't also take them; typing in a field, or with Ctrl / Alt,
+  // they're ordinary keys
+  window.addEventListener("keydown", function (e) {
+    if (!on || !padKeys.length || padKeys.indexOf(e.code) < 0 || e.ctrlKey || e.altKey || e.metaKey) return;
+    if (editable(document.activeElement)) return;
     e.preventDefault();
     e.stopImmediatePropagation();
   }, true);

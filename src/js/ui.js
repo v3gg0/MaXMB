@@ -3,6 +3,7 @@ import { sysBase, playerIcon } from "./themes.js";
 const mpIcon = (n) => playerIcon("mp", n, `./assets/icons/system/${n}.png`);
 import { call, Input, thumbUrl, stillUrl } from "./api.js";
 import { PadNav, MUSIC_LINKS, nodeX } from "./padnav.js";
+import { SpectrumTap } from "./ps3wave/spectrum.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -90,7 +91,7 @@ export function watchFarImages(root) {
     if (img._cv || img._loading) return;
     const url = img.dataset.far; if (!url) return;
     img._loading = true;
-    const src = new Image(); src.decoding = "async";
+    const src = img._src = new Image(); src.decoding = "async";
     src.onload = async () => {
       img._loading = false;
       if (!img.isConnected || !img._near) { src.onload = src.onerror = null; src.src = ""; return; }
@@ -113,12 +114,20 @@ export function watchFarImages(root) {
     src.src = url;
   };
   const hide = (img) => {
+    // (still loading when it went out of reach: stopped)
+    if (img._loading && img._src) { img._src.onload = img._src.onerror = null; img._src.src = ""; img._src = null; img._loading = false; }
     if (img._cv) { img._cv.width = 0; img._cv.remove(); img._cv = null; img.style.display = ""; }
     if (img.getAttribute("src") && !img.dataset.vsrc) { img.dataset.far = img.getAttribute("src"); img.removeAttribute("src"); }
   };
   // (the cells are watched: a picture's own element is hidden while its drawing shows)
   const io = new IntersectionObserver((es) => {
-    for (const e of es) { const img = e.target._farImg; if (!img) continue; img._near = e.isIntersecting; if (e.isIntersecting) show(img); else hide(img); }
+    // (a moment's wait before loading: scrolling quickly past, held, the cells
+    // going by don't each start a picture; the ones it stops near load first)
+    for (const e of es) {
+      const img = e.target._farImg; if (!img) continue;
+      img._near = e.isIntersecting; clearTimeout(img._nearT);
+      if (e.isIntersecting) img._nearT = setTimeout(() => { if (img._near) show(img); }, 90); else hide(img);
+    }
   }, { root: root.querySelector(".avpick-scroll"), rootMargin: "150% 0px" });
   imgs.forEach((i) => { const cell = i.parentElement; if (cell) { cell._farImg = i; io.observe(cell); } });
   root._farIO = io;
@@ -164,8 +173,22 @@ export function avatarSrc(ref) {
 // Sliders move by their smallest step; holding the button speeds them up
 // (x5 after ~1 s of repeats, then x25 and x100 on long ranges) so long ranges stay quick.
 const _accel = { key: null, t: 0, n: 0 };
+// Held Up / Down in a long menu (Select Background Music, Change Avatar, the
+// Photo Gallery...): faster and faster, like the XMB's own lists, a step of up
+// to a tenth of the rows
+export const heldRows = (key, rows) => holdAccel(key, Math.max(1, Math.floor(rows / 10)));
+// the cell `rows` rows up (-) or down (+) from i in a grid of `cols`, in the same column where it can
+export function gridStep(i, rows, cols, n) {
+  let j = i + rows * cols;
+  if (j < 0) j = i % cols;
+  while (j >= n && j - cols >= 0) j -= cols;
+  return Math.min(n - 1, j);
+}
 export function holdAccel(key, maxMult = 25) {
   const now = performance.now();
+  // (only a button held down speeds up: quick separate presses, however many,
+  // move one step each)
+  if (!window.__inputRepeat) { _accel.key = key; _accel.t = now; _accel.n = 0; return 1; }
   if (_accel.key === key && now - _accel.t < 260) _accel.n++; else _accel.n = 0;
   _accel.key = key; _accel.t = now;
   const m = _accel.n < 8 ? 1 : _accel.n < 22 ? 5 : _accel.n < 40 ? 25 : 100;
@@ -822,7 +845,7 @@ export class OnScreenKeyboard {
     // (the scroll bar on the right: its bright part is the rows on show; the ▲
     // over the panel once it's scrolled down, as on the console)
     const thumbH = OSK_SYM_ROWS / rows, thumbT = this.symTop / rows;
-    return `<div class="osk-symp">${this.symTop > 0 ? `<span class="osk-symup"></span>` : ""}<div class="osk-symgrid">${cells}</div>
+    return `<div class="osk-symp">${this.symTop > 0 ? `<img class="osk-symup" src="./assets/icons/vp/arrow_up.png" alt="">` : ""}<div class="osk-symgrid">${cells}</div>
       <div class="osk-symbar"><span class="osk-symthumb" style="top:${(thumbT * 100).toFixed(2)}%;height:${(thumbH * 100).toFixed(2)}%"></span></div></div>`;
   }
   _disptext() { return this.password ? "•".repeat(this.text.length) : this.text; }
@@ -1058,11 +1081,12 @@ export class AvatarPicker {
       else if (a === "back") this._cancel();
       return;
     }
+    const rows = Math.ceil(this.items.length / cols);
     if (a === "left" && this.i > 0) { this.i--; this._upd(); }
     else if (a === "right" && this.i < this.items.length - 1) { this.i++; this._upd(); }
-    else if (a === "up" && this.i - cols >= 0) { this.i -= cols; this._upd(); }
+    else if (a === "up" && this.i - cols >= 0) { this.i = gridStep(this.i, -heldRows("avpick:up", rows), cols, this.items.length); this._upd(); }
     else if (a === "down") {
-      if (this.i + cols < this.items.length) { this.i += cols; this._upd(); }
+      if (this.i + cols < this.items.length) { this.i = gridStep(this.i, heldRows("avpick:down", rows), cols, this.items.length); this._upd(); }
       else if (this._acts && this._acts.length) {   // to Confirm when it's usable, else Cancel
         const last = this._acts.length - 1;
         this.act = this._acts[last].classList.contains("disabled") ? 0 : last;
@@ -1122,11 +1146,12 @@ export class PhotoGrid {
       else if (a === "back") this._cancel();
       return;
     }
+    const rows = Math.ceil(this.photos.length / cols);
     if (a === "left" && this.i > 0) { this.i--; this._upd(); }
     else if (a === "right" && this.i < this.photos.length - 1) { this.i++; this._upd(); }
-    else if (a === "up" && this.i - cols >= 0) { this.i -= cols; this._upd(); }
+    else if (a === "up" && this.i - cols >= 0) { this.i = gridStep(this.i, -heldRows("pgrid:up", rows), cols, this.photos.length); this._upd(); }
     else if (a === "down") {
-      if (this.i + cols < this.photos.length) { this.i += cols; this._upd(); }
+      if (this.i + cols < this.photos.length) { this.i = gridStep(this.i, heldRows("pgrid:down", rows), cols, this.photos.length); this._upd(); }
       else if (this._acts && this._acts.length) { this.act = this._acts.length - 1; this.audio.play("cursor_down", 0.3); this._applyActFocus(); }
     }
     else if (a === "enter") this._pick();
@@ -1323,9 +1348,9 @@ export class ListPicker {
     const mv = (j) => { this.i = j; this.audio.play("cursor_down", 0.3); this._upd(); };
     if (a === "left" && this.i > 0) mv(this.i - 1);
     else if (a === "right" && this.i < n - 1) mv(this.i + 1);
-    else if (a === "up" && this.i - cols >= 0) mv(this.i - cols);
+    else if (a === "up" && this.i - cols >= 0) mv(gridStep(this.i, -heldRows("lpgrid:up", Math.ceil(n / cols)), cols, n));
     else if (a === "down") {
-      if (this.i + cols < n) mv(this.i + cols);
+      if (this.i + cols < n) mv(gridStep(this.i, heldRows("lpgrid:down", Math.ceil(n / cols)), cols, n));
       else { this.act = this._acts.length - 1; this.audio.play("cursor_down", 0.3); this._applyActFocus(); }
     }
     else if (a === "enter") { this.multi ? this._toggle() : this._done(); }
@@ -1346,8 +1371,9 @@ export class ListPicker {
       else if (a === "back") this._cancel();
       return;
     }
-    if (a === "up" && this.i > 0) { this.i--; this.audio.play("cursor_up", 0.4); this._upd(); }
-    else if (a === "down" && this.i < this.items.length - 1) { this.i++; this.audio.play("cursor_down", 0.4); this._upd(); }
+    const n = this.items.length;
+    if (a === "up" && this.i > 0) { this.i = Math.max(0, this.i - heldRows("lp:up", n)); this.audio.play("cursor_up", 0.4); this._upd(); }
+    else if (a === "down" && this.i < n - 1) { this.i = Math.min(n - 1, this.i + heldRows("lp:down", n)); this.audio.play("cursor_down", 0.4); this._upd(); }
     else if (a === "down" && this._acts && this._acts.length) { this.act = this._acts.length - 1; this.audio.play("cursor_down", 0.3); this._applyActFocus(); }
     else if (a === "enter") { this.multi ? this._toggle() : this._done(); }
     else if (a === "start" && this.multi) this._done();  // confirm multi-select
@@ -1373,6 +1399,9 @@ export function volMarkup(level) {
   return `<div class="mp2-vlabel">${label}</div><div class="mp2-vrow"><span class="mp2-vminus">-</span><span class="vbs">${beans}</span><span class="mp2-vplus">+</span></div>`;
 }
 
+// the Music Player's visualizers after the Visualizer Wave, picked at random (Visual Player)
+const VISUALIZERS = ["canyon"];
+
 export class MusicPlayer {
   // PS3 music player. Two independently-toggled overlays sit over the song info:
   //  - TRIANGLE toggles the icon control cluster (3 rows) + hover subtitle.
@@ -1383,6 +1412,9 @@ export class MusicPlayer {
   constructor(sfx) {
     this.sfx = sfx; this.el = document.getElementById("musicplayer");
     this.audioEl = new Audio();
+    // (read with CORS from the start, so the visualizers can read the music
+    // without loading the song again: switching to one never interrupts it)
+    this.audioEl.crossOrigin = "anonymous";
     this.audioEl.addEventListener("ended", () => this._onEnded());
     this.audioEl.addEventListener("timeupdate", () => this._tick());
     this.audioEl.addEventListener("play", () => this._renderStatus());
@@ -1424,7 +1456,13 @@ export class MusicPlayer {
     this._closed = false;
     this.sfx.pauseBg();
     document.body.classList.add("menu-open"); this.el.classList.add("show");
+    // the music goes through the visualizers' sound graph before it starts (no
+    // switch of its path later, mid-song), and the visualizers are made ready
+    // a moment after it starts, a piece at a time (the Visualizers Cache): the
+    // Visual Player then switches to them at once
+    this._spectrumTap();
     this._render(); this._load(true);
+    clearTimeout(this._prepT); this._prepT = setTimeout(() => this._prepareVisuals(), 1500);
   }
   close() {
     // hard-stop the player's audio so nothing keeps playing (or overlaps the
@@ -1436,6 +1474,12 @@ export class MusicPlayer {
     if (this._mm) window.removeEventListener("mousemove", this._mm);
     if (this._blobUrl) { URL.revokeObjectURL(this._blobUrl); this._blobUrl = null; }
     try { this.audioEl.pause(); this.audioEl.removeAttribute("src"); this.audioEl.load(); } catch (_) {}
+    this._visualOff(); this._visStep = 0;
+    clearTimeout(this._prepT);
+    // (the Visualizers Cache: let go when the player closes, unless Save Cache in
+    // System Directory keeps it for the next time; the sound graph rests meanwhile)
+    if (!(this.keepVisuals && this.keepVisuals())) this.freeVisuals();
+    if (this._tap && this._tap.ctx && this._tap.ctx.state === "running") this._tap.ctx.suspend().catch(() => {});
     clearTimeout(this._noteT); this._dlg = null;
     this.el.classList.remove("show", "dlg"); this.el.innerHTML = ""; document.body.classList.remove("menu-open");
     this.sfx.resumeBg();
@@ -1446,6 +1490,8 @@ export class MusicPlayer {
     this.coverUrl = null; this._err = false; this._decodeTried = false;
     if (this._blobUrl) { URL.revokeObjectURL(this._blobUrl); this._blobUrl = null; }
     this._wantPlay = !!autoplay;
+    if (this._visOn === "canyon") this._canyon.newTrack();
+    if (this._visOn === "earth") this._earth.newTrack();
     // if this track was preloaded (Preload All Songs), play the cached WAV
     // straight away instead of hitting the native error → decode round-trip.
     const pre = this.opts.decodedFor && this.opts.decodedFor(t);
@@ -1626,6 +1672,7 @@ export class MusicPlayer {
   // Fast Reverse / Fast Forward: 2 s per step, repeating while the button is held
   _startHold(dir, key) {
     this._stopHold();
+    this._holdKeyOn = key; this._holdAt = performance.now();
     this._seekBy(2 * dir); this._flashStatus();
     if (!key) return;
     const t0 = setTimeout(() => {
@@ -1661,7 +1708,7 @@ export class MusicPlayer {
     if (["prev", "next", "play", "pause", "playpause", "stop", "repeat", "shuffle"].includes(id)) setTimeout(() => this._flashStatus(), 0);
     switch (id) {
       case "vol": this._openVol(); return;
-      case "visual": break;                 // placeholder (no visualiser yet)
+      case "visual": this._nextVisual(); break;
       case "addpl": if (this.opts && this.opts.onAddToPlaylist) this.opts.onAddToPlaylist(this.tracks[this.idx]); return;
       case "del": this._askDelete(); return;
       case "display": this.displayOn = !this.displayOn; this._applyToggles(); this._tick(); break;
@@ -1735,6 +1782,131 @@ export class MusicPlayer {
     this.idx = Math.min(i >= 0 ? i : this.idx, this.tracks.length - 1);
     this._load(true);
   }
+  // Visual Player (□): the player's visualizers in turn. First the Visualizer
+  // Wave (the background instead, with Music Settings > Music Player Visualizer
+  // off), then one of the others picked at random, each as likely (only Canyon
+  // for now), then always the Earth (one of its flights at random), then back to
+  // the Visualizer Wave.
+  _nextVisual() {
+    const step = ((this._visStep || 0) + 1) % 3;
+    this._visualOff();
+    this._visStep = step;
+    if (step === 1) {
+      const pick = VISUALIZERS[Math.floor(Math.random() * VISUALIZERS.length)];
+      if (pick === "canyon") this._showCanyon();
+    } else if (step === 2) this._showEarth();
+  }
+  _visCanvas(key) {
+    const k = "_cv_" + key;
+    if (!this[k]) { this[k] = document.createElement("canvas"); this[k].className = "mp-visual"; document.body.appendChild(this[k]); }
+    return this[k];
+  }
+  _visCanvasFor(key) {
+    const k = "_cv_" + key;
+    this._visCanvas(key).classList.add("show");
+    // (the whole screen covered: the wave and the background hold still meanwhile)
+    document.body.classList.add("mpfull");
+    return this[k];
+  }
+  // a visualizer that can't be shown: the next one in turn instead (Canyon
+  // missing: the Earth; the Earth missing: back to the Visualizer Wave), and
+  // what's missing said once
+  _visFail(e, file) {
+    console.warn("Visual Player:", e);
+    const missing = new RegExp(file.replace(".", "\\.")).test(String(e && e.message));
+    const step = this._visStep;
+    this._visualOff();
+    if (missing) (this._visMissing ||= new Set()).add(file);
+    if (step === 1) { this._visStep = 2; this._showEarth(); return; }
+    this._visStep = 0;
+    this.sfx.play("error", 0.4);
+    const m = [...(this._visMissing || [])];
+    this._note(m.length ? `The Visual Player needs the PS3's ${m.join(" and ")} in resources\\ps3` : "The Visual Player can't be shown");
+    this._visMissing = null;
+  }
+  // The Visualizers Cache: each visualizer made once (its pictures and programs
+  // ready, drawn once while hidden), then kept until the player closes
+  _canyonReady() {
+    return this._canyonP ||= (async () => {
+      const { Canyon, loadCanyon } = await import("./ps3wave/canyon.js");
+      const archive = await loadCanyon();
+      if (this._closed) throw new Error("closed");
+      const c = new Canyon(this._visCanvas("canyon"), archive);
+      c.onError = (e) => this._visFail(e, "canyon.qrc");
+      c.prepare();
+      return c;
+    })().catch((e) => { this._canyonP = null; throw e; });
+  }
+  _earthReady() {
+    return this._earthP ||= (async () => {
+      const { Earth, loadEarth } = await import("./ps3wave/earth.js");
+      const archive = await loadEarth();
+      if (this._closed) throw new Error("closed");
+      const e = await Earth.create(this._visCanvas("earth"), archive);
+      e.onError = (x) => this._visFail(x, "earth.qrc");
+      e.prepare();
+      return e;
+    })().catch((e) => { this._earthP = null; throw e; });
+  }
+  // (a moment after the player opens: Canyon, then the Earth, while the music plays)
+  async _prepareVisuals() {
+    try { if (!this._closed) await this._canyonReady(); } catch (e) {}
+    try { if (!this._closed) await this._earthReady(); } catch (e) {}
+  }
+  // the Visualizers Cache let go: their pictures, programs and the PS3 files read for them
+  freeVisuals() {
+    this._visualOff();
+    const drop = (p, k) => { if (p) p.then((v) => { try { v.destroy(); } catch (e) {} }).catch(() => {}); if (this[k]) { this[k].remove(); this[k] = null; } };
+    drop(this._canyonP, "_cv_canyon"); drop(this._earthP, "_cv_earth");
+    this._canyonP = this._earthP = null; this._canyon = this._earth = null;
+    import("./ps3wave/canyon.js").then((m) => m.dropCanyon()).catch(() => {});
+    import("./ps3wave/earth.js").then((m) => m.dropEarth()).catch(() => {});
+  }
+  // Canyon: full screen behind the player, shaped by the music
+  // (ps3wave/canyon.js, from the console's canyon.qrc)
+  async _showCanyon() {
+    const token = this._visToken = {};
+    try {
+      const c = await this._canyonReady();
+      if (this._visToken !== token || this._closed) return;
+      this._canyon = c;
+      this._visCanvasFor("canyon");
+      if (c._shown) c.newTrack();
+      c._shown = true;
+      c.start(this._spectrumTap());
+      this._visOn = "canyon";
+    } catch (e) { if (this._visToken === token) this._visFail(e, "canyon.qrc"); }
+  }
+  // the Earth: full screen behind the player, a camera flight around the Earth
+  // picked at random, again on every new song (ps3wave/earth.js, from earth.qrc)
+  async _showEarth() {
+    const token = this._visToken = {};
+    try {
+      const e = await this._earthReady();
+      if (this._visToken !== token || this._closed) return;
+      this._earth = e;
+      this._visCanvasFor("earth");
+      if (e._shown) e.newTrack();
+      e._shown = true;
+      e.start();
+      this._visOn = "earth";
+      if (this._visMissing) { const m = [...this._visMissing]; this._visMissing = null; this._note(`The Visual Player needs the PS3's ${m.join(" and ")} in resources\\ps3`); }
+    } catch (e) { if (this._visToken === token) this._visFail(e, "earth.qrc"); }
+  }
+  _visualOff() {
+    this._visOn = null; this._visToken = null;
+    if (this._canyon) this._canyon.stop();
+    if (this._earth) this._earth.stop();
+    for (const k of ["_cv_canyon", "_cv_earth"]) if (this[k]) this[k].classList.remove("show");
+    document.body.classList.remove("mpfull");
+  }
+  // the music as it plays, for the visualizer: the player's audio goes through
+  // a Web Audio graph from now on (read with CORS, so the samples can be read)
+  _spectrumTap() {
+    if (!this._tap) this._tap = new SpectrumTap(this.audioEl);
+    this._tap.resume();
+    return this._tap;
+  }
   // a short message above the status icons (fades after 3 s)
   _note(text) {
     let n = this.el.querySelector(".mp-note");
@@ -1764,7 +1936,15 @@ export class MusicPlayer {
       case "l2": this.sfx.play("enter", 0.4); this._holdKey = "l2"; this._actId("frev"); this._holdKey = null; break;
       case "r2": this.sfx.play("enter", 0.4); this._holdKey = "r2"; this._actId("ffwd"); this._holdKey = null; break;
       case "start": this.sfx.play("enter", 0.4); this._actId("playpause"); break;
-      case "left": case "right": case "up": case "down": if (this.clusterOn) this._padMove(a); break;
+      // (with the control panel hidden, left / right do what L2 / R2 do:
+      // rewind and fast-forward, for as long as they're held)
+      case "left": case "right":
+        if (this.clusterOn) { this._padMove(a); break; }
+        // (the d-pad repeats while held: the hold already under way carries on)
+        // (a repeat comes 380 ms or more after the press, the button still down)
+        if (this._holdKeyOn === a && (this._holdT0 || this._holdT) && Input.held[a] && performance.now() - this._holdAt >= 300) break;
+        this.sfx.play("enter", 0.4); this._holdKey = a; this._actId(a === "left" ? "frev" : "ffwd"); this._holdKey = null; break;
+      case "up": case "down": if (this.clusterOn) this._padMove(a); break;
       case "enter": if (this.clusterOn) { this._holdKey = "enter"; this._act(); this._holdKey = null; } break;
       case "back": this.sfx.play("back", 0.5); this.close(); break;
     }

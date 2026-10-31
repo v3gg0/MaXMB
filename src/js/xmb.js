@@ -3,14 +3,18 @@
 // Users-locked boot, right-side option menus for games/users (Reference_1),
 // and a faithful PlayStation Network sign-up / sign-in flow.
 
-import { call, assetUrl, thumbUrl, stillUrl, bumpAsset, noExt, Input, cmpText, cmpBase, cmpNatural } from "./api.js";
-import { sysName, sysBase, sysUrl, themeIcon, setActiveThemes, THEME_OPTS, THEME_PARTS, themeOpt, customizationOn, activeThemes } from "./themes.js";
+import { call, logLine, assetUrl, thumbUrl, stillUrl, bumpAsset, noExt, Input, cmpText, cmpBase, cmpNatural } from "./api.js";
+import { sysName, sysBase, sysUrl, themeIcon, setActiveThemes, THEME_OPTS, THEME_PARTS, themeOpt, customizationOn, activeThemes, P3T_KEEP } from "./themes.js";
 import { MONTH_COLORS } from "./wave.js";
 import { ThemeBackground } from "./p3tbg.js";
 import { setLayerMedia, setOverlayMedia, isVideoPath } from "./chroma.js";
 import { fitMedia, FIT_MODES } from "./fit.js";
-import { shadeIcon, cachedShade, shadeSrc, loadIconImage, loadedIcon, importShades, exportShades, takeNewShadeCount, colorKey, pruneShades } from "./iconshade.js";
+import { shadeIcon, cachedShade, shadeSrc, loadIconImage, loadedIcon, importShades, exportShades, takeNewShadeCount, colorKey, pruneShades, glassMap, glowMask, dropOtherStyles, clearShades, edgeColor } from "./iconshade.js";
+import { glassLayer } from "./glasslayer.js";
+import { scanMarquees } from "./marquee.js";
 import { REAL_WAVE_DEFAULTS, REAL_PARTICLE_DEFAULTS, COMPLEX_EXTRA_DEFAULTS, COMPLEX_GRADIENT_PRESETS } from "./wavegl.js";
+import { ORIGINAL_SHARED } from "./ps3wave/original.js";
+import { forgetWaveCache, moveWaveCache } from "./ps3wave/wavecache.js";
 import { Keybinds, ACTIONS as KEY_ACTIONS, keyLabel, codeToVk } from "./keybinds.js";
 import { VideoPlayer } from "./videoplayer.js";
 import { PhotoViewer } from "./photoviewer.js";
@@ -19,6 +23,16 @@ import { GameMenu, GameInfo, GameConfirm } from "./gamemenu.js";
 import { UserInfo, IconChooser } from "./usermenus.js";
 import { SectionMethods, SECTION_MODES } from "./sections.js";
 import { KeybindMenu, ColorPicker, parseColor, colorHex, SideMenu, GameInfoPanel, TextForm, AvatarPicker, ListPicker, Confirm, MusicPlayer, PlaylistPicker, PhotoGrid, ProfileCard, PsnSignIn, holdAccel, VIRTUAL_KB, avatarSrc, isMaskAvatar, ALL_AVATARS, PSN_AVATARS, PSN_DEFAULT_AVATAR, randomPsnAvatar, avWaitCheck, STOCK_AVATARS, isStockAvatar, OnScreenKeyboard } from "./ui.js";
+
+// Icon Style choices (Theme Settings), in the order they're listed
+// (internal names: "glasslive" the reactive Liquid Glass, "glass" the same glass without bending
+// what's behind; an Icon Style saved by an older version that isn't listed here is shown as
+// Original (Reactive))
+const ICON_STYLES = [["glasslive", "Original (Reactive)"], ["glass", "Original"], ["glassglow", "Glow"], ["glasspulse", "Glow (Pulsating)"], ["glassclear", "Glass (Reactive)"], ["glossy", "Glossy"], ["flat", "Flat"]];
+// a menu row's / category's dim level: as its opacity, and as --io, which
+// Liquid Glass (Reactive) uses instead (styles.css: a dimmed parent would hide
+// the background from the glass, so the icon and label are dimmed themselves)
+function dimTo(el, v) { el.style.opacity = v; el.style.setProperty("--io", v); }
 
 // Layout metrics as FRACTIONS of the viewport, measured pixel-for-pixel from
 // real 1920x1080 XMB captures (Settings / Network / Game / PSN / Friends), so
@@ -190,6 +204,17 @@ const RESOLUTIONS = ["native", "1280x720", "1600x900", "1920x1080", "2560x1440",
 // the settings that can be negative) up to twice its original maximum.
 // Entry: [group, key, label, min, max, step, decimals, description?, labels?]
 const COMPLEX_GRADIENT_LABELS = ["Custom Colors", ...COMPLEX_GRADIENT_PRESETS.map((p) => p[0])];
+// With the Original wave, its settings go twice as far (and down to 0 where
+// the setting can be 0): not the background's colour channels, angle, preset
+// list, gradient length and curve, which have their own fixed ranges
+const ORIG_FIXED = new Set(["gradientPreset", "bgTopR", "bgTopG", "bgTopB", "bgBotR", "bgBotG", "bgBotB", "bgAngle", "bgSpan", "bgCurve"]);
+function origMeta(m) {
+  if (ORIG_FIXED.has(m[1])) return m;
+  const o = m.slice();
+  o[4] = m[4] * 2;
+  if (m[3] > 0) o[3] = 0;
+  return o;
+}
 const WAVE_PARAM_META = [
   // --- Background ---
   ["spline", "gradientPreset", "Gradient Preset", 0, COMPLEX_GRADIENT_PRESETS.length, 1, 0,
@@ -325,10 +350,31 @@ const SQUARE_LOOKS = [
     "spline:bgAngle": angle, "spline:bgCurve": curve, "spline:bgSpan": span,
   },
 }));
+// The same squares with the Original wave, fitted to captures of the console
+// with each colour (its background drawn under the console's own light and
+// tone mapping, so it takes its own inputs): the gradient's start and end,
+// its curve (how it brightens down the screen: fitted to the captures row by
+// row), the wave's colour and how much brighter than usual its light is
+const ORIG_SQUARES = {
+  "Red": { top: [158, 0, 11], bot: [189, 57, 71], curve: 0.241, wave: "#8afcff", gain: 1.808 },
+  "Orange": { top: [84, 52, 14], bot: [167, 120, 40], curve: 0.4, wave: "#bec7c6", gain: 1.0 },
+  "Brown": { top: [37, 23, 12], bot: [121, 92, 81], curve: 0.4, wave: "#fdffe6", gain: 1.091 },
+  "Olive": { top: [111, 111, 36], bot: [162, 172, 59], curve: 0.4, wave: "#b2b5ba", gain: 1.0 },
+  "Green": { top: [0, 124, 0], bot: [57, 127, 34], curve: 0.218, wave: "#fe9fff", gain: 1.585 },
+  "Turquoise": { top: [17, 96, 82], bot: [67, 176, 162], curve: 0.4, wave: "#f7d3db", gain: 1.559 },
+  "Blue": { top: [0, 29, 82], bot: [87, 97, 195], curve: 0.4, wave: "#fceee6", gain: 1.834 },
+  "Royal Blue": { top: [45, 57, 146], bot: [61, 88, 211], curve: 0.664, wave: "#bcd7cc", gain: 1.0 },
+  "Purple": { top: [114, 0, 83], bot: [142, 53, 171], curve: 0.267, wave: "#adffe7", gain: 1.27 },
+  "Silver": { top: [109, 109, 109], bot: [158, 158, 158], curve: 0.4, wave: "#acacac", gain: 1.0 },
+  "Black": { top: [58, 58, 58], bot: [0, 0, 0], wave: "#fffffe", gain: 1.945 },
+};
 const squareLook = (hex) => SQUARE_LOOKS.find((q) => q.hex.toLowerCase() === String(hex || "").toLowerCase()) || null;
 const waveParamDefault = (group, key) => ({
   particle: REAL_PARTICLE_DEFAULTS, spline: { ...REAL_WAVE_DEFAULTS, ...COMPLEX_EXTRA_DEFAULTS },
 }[group] || REAL_WAVE_DEFAULTS)[key];
+
+// a user's / Account Management's icon while its △ panel is open (IMG_3734 / IMG_3736)
+const TRI_ZOOM = 1.26;
 
 export class Xmb {
   constructor(audio, wave, cbs) {
@@ -338,10 +384,13 @@ export class Xmb {
     if (wave) {
       wave.onIconAuto = (rgb, gain, def) => {
         ICON_AUTO_RGB = rgb; ICON_AUTO_GAIN = gain || 1; ICON_AUTO_DEFAULT = def || rgb;
-        if ((this.user?.theme?.iconColor || "#ffffff") === "auto") { applyIconColorVar("auto"); if (this.root) this._applyXmbwShading(); }
+        if (this._pickHex() === "auto") { applyIconColorVar("auto"); if (this.root) this._applyXmbwShading(); }
       };
       if (wave.iconAutoRgb) { ICON_AUTO_RGB = wave.iconAutoRgb; ICON_AUTO_GAIN = wave.iconAutoGain || 1; ICON_AUTO_DEFAULT = wave.iconAutoDefault || wave.iconAutoRgb; }
       setInterval(() => { try { wave.updateMenuTint(); } catch (e) {} }, 60000);
+      // the Original wave ready (or not available): its colours for the icons
+      // and menus, and the Wave Style row reads what's really shown
+      wave.onStyleChange = () => { try { wave.updateMenuTint(); if (this.root && this.levels) this._layoutItems(this.root.clientWidth, this.root.clientHeight); } catch (e) {} };
     }
     this.root = document.getElementById("xmb");
     this.sideMenu = new SideMenu(audio);
@@ -365,6 +414,8 @@ export class Xmb {
     this.listPicker = new ListPicker(audio);
     this.confirm = new Confirm(audio);
     this.musicPlayer = new MusicPlayer(audio);
+    // (the Visualizers Cache kept between uses with Save Cache in System Directory)
+    this.musicPlayer.keepVisuals = () => !!this.settings?.behavior?.cacheInAppDir;
     // a background that finishes loading while a menu is open over it (the
     // Photo Gallery opened right after signing in): the menu's blurred view of
     // what's behind it is made again, so it doesn't stay black
@@ -442,7 +493,14 @@ export class Xmb {
   async start(manifest, { noAutoLogin = false } = {}) {
     this.manifest = manifest;
     this.locked = true; this.user = null;
+    // (the Icon Style of the last session, from the start: see _iconStyle;
+    // only how the icons are drawn: the icon images themselves are read from
+    // the saved cache and made at log-in, as before, so the start isn't held up)
+    this._iconStyleAttrs();
     await this._buildColumns();
+    // (and drawn in it before anyone signs in, as well: the reactive glass is
+    // started and the saved icon pictures loaded, without holding up the start)
+    this._applyIconStyle().catch(() => {});
     // Automatic Login: that user is logged in at once, on What's New
     const auto = noAutoLogin ? null : (this.usersFile?.users || []).find((u) => u.autoLogin);
     if (auto) {
@@ -646,6 +704,8 @@ export class Xmb {
             childrenFn: () => this._bgPlaylistItems("bg") },
       ] },
       { kind: "drill", title: "Wave and Sparkles", icon: SI, children: [
+        { kind: "setting", ctl: "wavestyle", title: "Wave Style", icon: SI,
+            sub: "The linkev Wave Style is recommended for better performance" },
         { kind: "setting", ctl: "waves", title: "Wave", icon: SI },
         { kind: "setting", ctl: "wavecolor", title: "Wave Color", icon: SI },
         { kind: "setting", ctl: "dots", title: "Sparkles", icon: SI },
@@ -653,7 +713,8 @@ export class Xmb {
         { kind: "drill", title: "Wave and Sparkles Personalization", icon: SI, childrenFn: this._wavePersonalizationItems },
       ] },
       { kind: "drill", title: "Icons", icon: SI, children: [
-        { kind: "setting", ctl: "iconcolor", title: "Icon Color", icon: SI },
+        { kind: "setting", ctl: "iconcoloron", title: "Icon Color", icon: SI, sub: "On: Make all icons share the same color." },
+        { kind: "setting", ctl: "iconcolor", title: "Icon Color Pick", icon: SI },
         { kind: "setting", ctl: "iconstyle", title: "Icon Style", icon: SI },
         { kind: "setting", ctl: "introicon", title: "Intro Icon", icon: SI, sub: this._introArtSub("icon") },
         { kind: "setting", ctl: "introtitle", title: "Intro Title", icon: SI, sub: this._introArtSub("title") },
@@ -1526,8 +1587,30 @@ export class Xmb {
       ...(srcs.length ? [{ kind: "action", act: "gsrc_scan", title: "Game Recognition", icon: SI,
         sub: "Looks for new games in the source folders now. New games are also found every time you open the Game column." }] : []),
       ...srcs.map((p, i) => ({ kind: "action", act: `gsrc_remove::${i}`, title: base(p), icon: { sys: "icon_game.png" },
-        sub: `${winPath(p)}\nPress \u2715 to remove this source folder. The games found in it are removed from the Games folder (the games themselves aren't touched).` })),
+        sub: `${winPath(p)}\n${this._gsrcModeOf(p) === "apps" ? "By Executables" : "By Folders"}. Press \u2715 to change how the games are separated or to remove it.` })),
     ];
+  }
+  // How a source folder is read: "folders" (Games in Folders: each folder in
+  // it is a game, or the folder itself is one) or "apps" (Separate Apps: each
+  // program and shortcut lying in it is an entry of its own); kept in
+  // settings.gameSourceModes (the backend reads it too)
+  _gsrcModeOf(p) { return (this.settings.gameSourceModes || {})[p] === "apps" ? "apps" : "folders"; }
+  _gsrcSetMode(p, mode) {
+    const m = (this.settings.gameSourceModes ||= {});
+    if (mode === "apps") m[p] = "apps"; else delete m[p];
+  }
+  _gsrcAskMode(path, cur) {
+    return new Promise((res) => {
+      this.overlay = this.listPicker;
+      const items = [
+        { id: "folders", label: "By Folders (Recommended)", sub: "The games in this folder are contained in their own folders." },
+        { id: "apps", label: "By Executables", sub: "2 or more games share a folder." },
+      ];
+      this.listPicker.open({ title: `${String(path).split(/[\\/]/).filter(Boolean).pop() || path}: How the Games are separated`, items, submit: "Select" },
+        (ch) => { this.listPicker.close(); this.overlay = null; res(ch ? ch.id : null); },
+        () => { this.listPicker.close(); this.overlay = null; res(null); });
+      if (cur) { const i = items.findIndex((x) => x.id === cur); if (i > 0) { this.listPicker.i = i; this.listPicker._render(); } }
+    });
   }
   // ---- Game Databases (Game Recognition) -------------------------------------
   _scrapeCfg() { return (this.settings.scrape ||= {}); }
@@ -1606,24 +1689,46 @@ export class Xmb {
     this._picking = false;
     if (!path) return;
     const list = this.settings.gameSources || (this.settings.gameSources = []);
-    if (!list.includes(path)) list.push(path);
+    if (list.includes(path)) { this.audio.play("error", 0.4); this._shotFeedback("This folder is already a source folder"); return; }
+    const mode = await this._gsrcAskMode(path);
+    if (!mode) return;
+    this._gsrcSetMode(path, mode);
+    list.push(path);
     await this._persistSettings(); this.audio.play("enter", 0.5);
     this._rebuildLevel(this._gameRecognitionItems);
     const lvl = this._level(); const i = lvl.items.findIndex((x) => x.act === "gsrc_scan");
     if (i >= 0) { lvl.sel = i; this._render(); this._onSelect(); }
     this._gsrcScan(false);
   }
-  _gsrcRemove(i) {
+  // a source folder: how it's read changed, or removed
+  async _gsrcRemove(i) {
     const list = this.settings.gameSources || [];
     if (!list[i]) return;
+    const src = list[i], cur = this._gsrcModeOf(src);
+    const ch = await this._askList(String(src).split(/[\\/]/).filter(Boolean).pop() || src, [
+      { id: "mode", label: "Change How the Games are separated" },
+      { id: "remove", label: "Remove Folder" },
+    ]);
+    if (!ch) return;
+    if (ch.id === "mode") {
+      const mode = await this._gsrcAskMode(src, cur);
+      if (!mode || mode === cur) return;
+      if (!(await this._askConfirm(`The games found in the ${src} folder are removed from the Games folder and it's read again ${mode === "apps" ? "By Executables" : "By Folders"} (the games themselves aren't touched). Any icon, background, preview or music you added to them goes too.\nAre you sure you want to continue?`))) return;
+      try { await call("game_sources_remove", { source: src }); } catch (e) {}
+      this._gsrcSetMode(src, mode);
+      await this._persistSettings(); this.audio.play("enter", 0.5);
+      await this._loadDetected();
+      this._rebuildLevel(this._gameRecognitionItems);
+      this._gsrcScan(false);
+      return;
+    }
     this.overlay = this.confirm;
     this.confirm.open(`Remove the ${list[i]} folder? The games found in it are removed from the Games folder too (the games themselves aren't touched).`,
       [{ label: "Yes", id: "yes" }, { label: "No", id: "no" }],
       async (c) => {
         this.confirm.close(); this.overlay = null;
         if (c && c.id === "yes") {
-          const src = list[i];
-          list.splice(i, 1); this._persistSettings(); this.audio.play("back", 0.5);
+          list.splice(i, 1); this._gsrcSetMode(src, "folders"); this._persistSettings(); this.audio.play("back", 0.5);
           try { await call("game_sources_remove", { source: src }); } catch (e) {}
           await this._loadDetected();
           this._rebuildLevel(this._gameRecognitionItems);
@@ -1681,11 +1786,13 @@ Are you sure you want to continue?`,
       { kind: "action", act: "cache_clear::videos", title: "Delete Preloaded Videos Data", icon: SI },
       { kind: "action", act: "cache_clear::decoded", title: "Delete Preloaded Songs Data", icon: SI },
       { kind: "action", act: "cache_clear::icons", title: "Delete Icon Shading", icon: SI },
+      { kind: "action", act: "cache_clear::wave", title: "Delete Wave Cache", icon: SI },
+      { kind: "action", act: "cache_clear::visualizers", title: "Delete Visualizers Cache", icon: SI },
       { kind: "action", act: "cache_clear::all", title: "Delete All Cache", icon: SI },
     ];
   }
   _clearCache(category) {
-    const names = { all: "all cached data", decoded: "the preloaded songs data", covers: "the song covers", icons: "the icon shading", videos: "the preloaded videos data", thumbs: "the photo thumbnails" };
+    const names = { all: "all cached data", decoded: "the preloaded songs data", covers: "the song covers", icons: "the icon shading", videos: "the preloaded videos data", thumbs: "the photo thumbnails", wave: "the wave cache", visualizers: "the visualizers cache" };
     this.overlay = this.confirm;
     this.confirm.open(
       `Delete ${names[category] || "this cache"}?`,
@@ -1712,7 +1819,16 @@ Are you sure you want to continue?`,
     if (all || category === "videos") { this._vplay = new Map(); this._noAutoConvert = true; this._applyWallpaper(); }
     if (all || category === "decoded") { this._decoded = {}; this._applyBgMusic(true); }
     if (all || category === "covers" || category === "thumbs") { try { await this._refreshMediaColumns(undefined, true); } catch (e) {} }
-    if (all || category === "icons") { this._xsPreDone = null; this._applyXmbwShading(); }
+    // (the wave's prepared start is made again, and saved, at its next start)
+    if (all || category === "wave") forgetWaveCache();
+    if (all || category === "visualizers") this.musicPlayer.freeVisuals();
+    if (all || category === "icons") {
+      // (the pictures in memory too, and every icon shaded again from nothing)
+      clearShades();
+      for (const el of document.querySelectorAll(".sysicon[data-xs]")) { delete el.dataset.xs; if (el.__lg) glassLayer().detach(el); }
+      if (this._glassOn) glassLayer().forgetMaps();
+      this._xsPreDone = null; this._applyXmbwShading();
+    }
   }
   // ---- Friend Personalization submenu ---------------------------------------
   _friendPersonalizationItems() {
@@ -2245,12 +2361,15 @@ Are you sure you want to continue?`,
   // translucency, like on the PS3. An icon is kept invisible until its glass
   // image is ready (no flash of the plain fill), and every icon is shaded
   // ahead of time in the background so new submenus appear finished.
+  // Icons > Icon Color off: every icon in its own colours (the system's white),
+  // Icon Color Pick not used
+  _pickHex(t = this.user?.theme) { return t?.iconColorAll === false ? "#ffffff" : (t?.iconColor || "#ffffff"); }
   _iconRgb() {
-    const hex = (this.user?.theme?.iconColor) || "#ffffff";
+    const hex = this._pickHex();
     // "Original" with Icon Style Default: paler and brighter on a bright
     // background (the brightness is a lift, not a multiply, so the shading stays)
     if (hex !== "auto") return hexToRgb01(hex);
-    return this._iconStyle() === "default" ? [...ICON_AUTO_DEFAULT, ICON_AUTO_GAIN] : ICON_AUTO_RGB.slice();
+    return this._iconStyle() === "glasslive" ? [...ICON_AUTO_DEFAULT, ICON_AUTO_GAIN] : ICON_AUTO_RGB.slice();
   }
   // saved icon shading from the last run (temp folder, or the system directory
   // with "Save Cache in System Directory"), loaded once at start
@@ -2281,6 +2400,7 @@ Are you sure you want to continue?`,
     this._xsSaveT = setTimeout(() => {
       // (memory keeps the same colours as the saved file: the 3 used last, the current one among them)
       pruneShades([...this._xsColors, colorKey(this._iconRgb()), colorKey([1, 1, 1])]);   // (a theme's own-coloured icons use white)
+      if (this._keepStyles) dropOtherStyles(this._keepStyles);   // (only the style in use is kept)
       if (!takeNewShadeCount()) return;
       call("icon_shades_save", { data: JSON.stringify(exportShades(this._xsColors)) }).catch(() => {});
     }, 3000);
@@ -2294,11 +2414,13 @@ Are you sure you want to continue?`,
       for (const el of this.root.querySelectorAll(".sysicon[data-sys][data-xs]")) {
         const u = `url('${el.dataset.tsrc || sysBase(el.getAttribute("data-sys"))}')`;
         el.style.background = ""; el.style.webkitMaskImage = u; el.style.maskImage = u;
+        if (el.__lg) glassLayer().detach(el);
+        if (el.classList.contains("ig-glow")) { el.classList.remove("ig-glow"); el.style.removeProperty("--glow-mask"); el.style.removeProperty("--glow-c"); }
         delete el.dataset.xs; el.classList.remove("xs-ready", "xs-late");
       }
       return;
     }
-    const st = this._iconStyle();
+    const st = this._shadeStyle();
     const rgbAll = this._iconRgb();
     const queue = this._xsQueue || (this._xsQueue = new Map());
     const previewing = this.overlay === this.colorPicker;
@@ -2318,33 +2440,54 @@ Are you sure you want to continue?`,
     });
     this._xsPump();
     this._xsPrewarmSoon();
+    // Glow styles: the full-colour pictures (Photo Gallery, PlayStation®Network,
+    // PlayStation®Plus, PlayStation®Home, What's New...) glow too, in the
+    // colour of their own border (styles.css: .coloricon under data-glow)
+    if (this._shadeStyle() === "glass" && this._iconStyle() !== "glass") {
+      this.root.querySelectorAll(".coloricon:not([data-gc])").forEach((el) => {
+        const src = el.tagName === "IMG" ? el.getAttribute("src") : el.querySelector("img")?.getAttribute("src");
+        if (!src) return;
+        el.dataset.gc = "1";
+        loadIconImage(src).then((im) => { const c = edgeColor(im, "c|" + src); if (c && el.isConnected) el.style.setProperty("--glow-c", c); this._syncGlowPulse(); }).catch(() => {});
+      });
+    }
   }
   // custom section pictures with their Icon Style effect: shaded exactly like
   // the system's icons (in the Icon Color, or in their own colours), kept in
   // their own shape; Flat style: the plain picture (or its shape in the Icon
   // Color, by the CSS)
   _shadeCustomIcons(on) {
-    const st = this._iconStyle(), rgbAll = this._iconRgb();
+    // (custom pictures are drawn as pictures, which can't bend what's behind
+    // them: with the reactive Liquid Glass they get the filter version)
+    // (a square-ish picture gets the reactive glass like the system's icons:
+    // the glass layer draws a square picture fitted in the icon's box, so a
+    // much wider or taller one keeps the filter version)
+    const sh = this._shadeStyle(), rgbAll = this._iconRgb();
+    const squarish = (im) => { const w = im.naturalWidth || im.width, h = im.naturalHeight || im.height; return w && h && Math.max(w / h, h / w) <= 1.15; };
     for (const el of this.root.querySelectorAll(".custwrap[data-tsrc]")) {
       const img = el.querySelector(".cust-img"); if (!img) continue;
       const src = el.dataset.tsrc, own = !!el.dataset.own;
       if (!on) {
         if (img.getAttribute("src") !== src) img.src = src;
-        el.classList.remove("cs-ready"); delete el.dataset.xs; continue;
+        el.classList.remove("cs-ready"); delete el.dataset.xs;
+        if (el.__lg) glassLayer().detach(el);
+        if (el.classList.contains("ig-glow")) { el.classList.remove("ig-glow"); el.style.removeProperty("--glow-mask"); el.style.removeProperty("--glow-c"); }
+        continue;
       }
       const rgb = own ? [1, 1, 1] : rgbAll;
       const name = `c:${el.dataset.tkey || src}${own ? "|own" : ""}`;
-      const ck = st + "|" + name + "|" + colorKey(rgb);
-      if (el.dataset.xs === ck) continue;
-      const apply = (u) => { if (!el.isConnected) return; img.src = shadeSrc(u); el.dataset.xs = ck; el.classList.add("cs-ready"); };
-      const hit = cachedShade(name, rgb, st);
-      if (hit) { apply(hit); continue; }
+      const shade = (im) => {
+        const live = sh === "glasslive" && squarish(im), st = sh === "glasslive" && !live ? "glass" : sh;
+        const ck = st + "|" + name + "|" + colorKey(rgb);
+        if (el.dataset.xs === ck || !el.isConnected) return;
+        const u = cachedShade(name, rgb, st) || (this._xsScheduleSave(colorKey(rgb)), shadeIcon(im, rgb, name, st, own, true));
+        const bg = shadeSrc(u);
+        img.src = bg; el.dataset.xs = ck; el.classList.add("cs-ready");
+        this._iconExtras(el, src, name, ck, bg, live);
+      };
       const ready = loadedIcon(src);
-      if (ready) { apply(shadeIcon(ready, rgb, name, st, own, true)); this._xsScheduleSave(colorKey(rgb)); continue; }
-      loadIconImage(src).then((im) => {
-        if (!el.isConnected || el.dataset.xs === ck) return;
-        apply(cachedShade(name, rgb, st) || shadeIcon(im, rgb, name, st, own, true)); this._xsScheduleSave(colorKey(rgb));
-      }).catch(() => {});
+      if (ready) { shade(ready); continue; }
+      loadIconImage(src).then(shade).catch(() => {});
     }
   }
   // what an icon element is shaded as: its picture, its cache name, its colour
@@ -2374,14 +2517,19 @@ Are you sure you want to continue?`,
       if (depth < 2 && Array.isArray(it.children)) walk(it.children, depth + 1);
     } };
     for (const c of this.columns) { if (c.icon) names.add(c.icon); walk(c.items, 0); }
-    const st = this._iconStyle(), rgbAll = this._iconRgb(), seen = new Set();
+    const st = this._shadeStyle(), rgbAll = this._iconRgb(), seen = new Set();
     // (nothing changed since the last full pass: nothing to do)
-    const sig = `${st}|${colorKey(rgbAll)}|${activeThemes().map((t) => t.key).join(",")}|${[...names].join(",")}`;
+    const ist = this._iconStyle(), live = this._shadeStyle() === "glasslive", glow = ist === "glassglow" || ist === "glasspulse";
+    const sig = `${ist}|${colorKey(rgbAll)}|${activeThemes().map((t) => t.key).join(",")}|${[...names].join(",")}`;
+    // (the reactive glass's lens and the glow's shape, ready before they're shown, too)
+    // (the icon's own name: a theme's icon names hold "|" themselves)
+    const extraKey = (j) => j.name;
+    const needs = (j) => !cachedShade(j.name, j.rgb, j.st) || (live && !glassMap(extraKey(j), null)) || (glow && !glowMask(extraKey(j), null));
     if (sig === this._xsPreDone) return;
     const box = document.createElement("div");
     box.innerHTML = [...names].map((n) => iconHTML(n)).join("");
     const jobs = [...box.querySelectorAll(".sysicon[data-sys]:not(.coloricon)")].map((el) => this._xsJob(el, st, rgbAll))
-      .filter((j) => j && !seen.has(j.ck) && seen.add(j.ck) && !cachedShade(j.name, j.rgb, j.st));
+      .filter((j) => j && !seen.has(j.ck) && seen.add(j.ck) && needs(j));
     if (!jobs.length) { this._xsPreDone = sig; return; }
     // the pictures first (loading is off the main thread), then the shading, a
     // few at a time in the gaps between frames, never while buttons are being
@@ -2399,15 +2547,53 @@ Are you sure you want to continue?`,
         if (n >= 1 && (!dl || dl.didTimeout || dl.timeRemaining() < 6)) break;
         const j = jobs[i], img = imgs[i]; i++;
         if (img && !cachedShade(j.name, j.rgb, j.st)) { shadeIcon(img, j.rgb, j.name, j.st, j.own); done++; }
+        if (img && live) glassMap(extraKey(j), img);
+        if (img && glow) glowMask(extraKey(j), img);
       }
     }
     this._xsPreDone = sig;
     if (done) this._xsScheduleSave(colorKey(rgbAll));
   }
   _xsSet(el, url, ck) {
-    el.style.webkitMaskImage = "none"; el.style.maskImage = "none";
-    el.style.background = `url("${shadeSrc(url)}") center/contain no-repeat`;
+    const bg = shadeSrc(url);
+    el.style.background = `url("${bg}") center/contain no-repeat`;
     el.dataset.xs = ck; el.classList.add("xs-ready"); el.classList.remove("xs-late");
+    el.style.webkitMaskImage = "none"; el.style.maskImage = "none";
+    const sys = el.getAttribute("data-sys");
+    // (the icon's name inside "<style>|<name>|<colour>": a theme's icon names
+    // hold "|" themselves, so only the first and last parts are taken off; taking
+    // the second part gave every theme icon the first one's glass and glow shape)
+    const src = sys ? (el.dataset.tsrc || sysBase(sys)) : null, name = ck.slice(ck.indexOf("|") + 1, ck.lastIndexOf("|"));
+    this._iconExtras(el, src, name, ck, bg, this._shadeStyle() === "glasslive");
+  }
+  // The parts of an Icon Style drawn around / through a shaded icon: the
+  // reactive glass (`live`: the background bent through it, by the glass
+  // layer) and the Glow styles' glow. For the XMB's icons (_xsSet) and the
+  // custom sections' pictures (_shadeCustomIcons). `src`: its picture; `name`:
+  // its cache name; `bg`: the shaded picture shown.
+  _iconExtras(el, src, name, ck, bg, live) {
+    const st = this._iconStyle();
+    // Default (reactive Liquid Glass): the background behind the icon bent
+    // through it, drawn by the glass layer (glasslayer.js)
+    const gl = live && src ? glassLayer() : null;
+    if (gl && gl.ok) {
+      const put = (im) => { if (el.isConnected && el.dataset.xs === ck) gl.attach(el, glassMap(name, im), bg); };
+      const im = loadedIcon(src);
+      if (im) put(im); else loadIconImage(src).then(put).catch(() => {});
+    } else if (el.__lg) glassLayer().detach(el);
+    // Glow / Glow (Pulsating): a glow around the icon's shape (outside it only)
+    if ((st === "glassglow" || st === "glasspulse") && src) {
+      const put = (im) => { const u = glowMask(name, im); if (u && el.isConnected && el.dataset.xs === ck) { el.style.setProperty("--glow-mask", `url("${u}")`); el.classList.add("ig-glow"); this._syncGlowPulse(); } };
+      // (the glow takes the colour of the icon's own border, as drawn in this
+      // style and colour; a theme's picture drawn in your Icon Color glows in
+      // that colour, whatever colours the picture itself has inside)
+      if (el.dataset.tsrc && !el.dataset.own) {
+        const rgb = this._iconRgb(), k = rgb[3] || 1;
+        el.style.setProperty("--glow-c", rgb.slice(0, 3).map((v) => Math.round(Math.min(1, v * k) * 255)).join(","));
+      } else loadIconImage(bg).then((im) => { const c = edgeColor(im, bg); if (c && el.isConnected && el.dataset.xs === ck) el.style.setProperty("--glow-c", c); }).catch(() => {});
+      const im = loadedIcon(src);
+      if (im) put(im); else loadIconImage(src).then(put).catch(() => {});
+    } else if (el.classList.contains("ig-glow")) { el.classList.remove("ig-glow"); el.style.removeProperty("--glow-mask"); el.style.removeProperty("--glow-c"); }
   }
   // shade the icons still waiting, a few per frame (keeps the UI smooth while a
   // colour is being previewed)
@@ -2481,7 +2667,7 @@ Are you sure you want to continue?`,
         c._el.style.left = `${anchorX}px`;
         c._el.style.top = `${cy}px`;
         c._el.classList.toggle("sel", isCur);
-        c._el.style.opacity = isCur ? "0.85" : "0";
+        dimTo(c._el, isCur ? "0.85" : "0");
         c._el.style.pointerEvents = isCur ? "auto" : "none";
       });
       return;
@@ -2496,8 +2682,8 @@ Are you sure you want to continue?`,
       c._el.classList.toggle("sel", d === 0);
       // captures: the others are only slightly dimmer (on a bright background
       // with Icon Style Default, barely at all, as on the console)
-      const brightDef = document.documentElement.hasAttribute("data-bright-bg") && this._iconStyle() === "default";
-      c._el.style.opacity = d === 0 ? "1" : (brightDef ? "0.95" : "0.78");
+      const brightDef = document.documentElement.hasAttribute("data-bright-bg") && this._iconStyle() === "glasslive";
+      dimTo(c._el, d === 0 ? "1" : (brightDef ? "0.95" : "0.78"));
     });
   }
 
@@ -2577,12 +2763,38 @@ Are you sure you want to continue?`,
       const inside = j >= a && j <= b;
       // a little slack before dropping a row, so moving back and forth doesn't rebuild it
       const keep = j >= a - 4 && j <= b + 4;
-      if (it._el && !keep) { it._el.remove(); it._el = null; }
+      if (it._el && !keep) { dropMedia(it._el); it._el.remove(); it._el = null; }
       else if (!it._el && inside) { this._makeItemEl(lvl, it, j); made = true; }
     });
+    // (scrolling fast: the pictures of the rows passing by wait, see _lazyArt)
+    if (this._lazyEls && this._lazyEls.size) this._lazyArtSoon();
     if (lvl.inFolder && this._dynCovers(lvl)) this._coverSwap(lvl);
     // new rows' icons get their shading right away (no blank frame)
     if (made && !this._inWindowShade) { this._inWindowShade = true; try { this._applyXmbwShading(); } finally { this._inWindowShade = false; } }
+  }
+  // a row's media pictures held back while the list scrolls fast
+  _lazyArt(el) {
+    let any = false;
+    for (const img of el.querySelectorAll("img.art-img, img.ff-thumb, img.item-avatar")) {
+      const u = img.getAttribute("src");
+      if (!u || /^(\.\/)?assets\//.test(u) || (img.complete && img.naturalWidth)) continue;
+      img.dataset.lazy = u; img.removeAttribute("src"); any = true;
+    }
+    for (const v of el.querySelectorAll("video.preview-vid")) { const u = v.getAttribute("src"); if (u) { v.dataset.lazy = u; v.removeAttribute("src"); any = true; } }
+    if (any) (this._lazyEls ||= new Set()).add(el);
+  }
+  // ...and loaded once it slows down (nearest the selection first)
+  _lazyArtSoon() {
+    clearTimeout(this._lazyT);
+    this._lazyT = setTimeout(() => {
+      if (this._gl && this.$items.classList.contains("glide-fast")) { this._lazyArtSoon(); return; }
+      const els = [...this._lazyEls].filter((e) => e.isConnected);
+      this._lazyEls.clear();
+      const sel = this.$items.querySelector(".item.sel");
+      const y0 = sel ? sel.offsetTop : 0;
+      els.sort((a, b) => Math.abs(a.offsetTop - y0) - Math.abs(b.offsetTop - y0));
+      for (const el of els) for (const m of el.querySelectorAll("[data-lazy]")) { m.setAttribute("src", m.dataset.lazy); delete m.dataset.lazy; }
+    }, 120);
   }
   // songs in an opened folder: more than 15 → covers loaded as needed
   _dynCovers(lvl) {
@@ -2630,6 +2842,11 @@ Are you sure you want to continue?`,
     // a setting's current choice, on the right of its row (IMG_3605)
     if (it.kind === "setting" && it.ctl !== "sysinfo") el.insertAdjacentHTML("beforeend", `<div class="item-setval"></div>`);
     watchArtLoading(el, this._secFlat()); watchArtRatio(el);
+    // (the list scrolling fast, held: the picture waits until the scrolling
+    // slows down (the loading icon and the section's icon meanwhile), so the
+    // rows going past don't each start loading one and the ones the cursor
+    // stops at come first)
+    if (this._gl && this.$items.classList.contains("glide-fast")) this._lazyArt(el);
     // left click: the item is chosen and opened (as ✕ does); right click: its △ menu (main.js)
     el.addEventListener("click", () => {
       if (this.overlay || this._level() !== lvl) return;
@@ -2681,7 +2898,7 @@ Are you sure you want to continue?`,
         if (lvl._anchorEl) {
           lvl._anchorEl.style.left = `${spineOf(li)}px`;
           lvl._anchorEl.style.top = `${sy}px`;
-          lvl._anchorEl.style.opacity = li === active - 1 ? "0.8" : "0.5";
+          dimTo(lvl._anchorEl, li === active - 1 ? "0.8" : "0.5");
           lvl._anchorEl.style.zIndex = "1";
         }
         if (lvl._ghosts && lvl._ghosts.length) {
@@ -2711,7 +2928,7 @@ Are you sure you want to continue?`,
         it._el.style.left = `${isCard ? sx - (isSel ? CARD_X : CARD_COMPACT_X) * w : sx}px`;
         it._el.style.top = `${tops[j]}px`;
         // every non-selected row is drawn at the same dim level (as in the refs)
-        it._el.style.opacity = isSel ? "1" : "0.55";
+        dimTo(it._el, isSel ? "1" : "0.55");
         it._el.style.zIndex = isSel ? "5" : "1";
         // songs / photos / videos / games: a title too long for the screen
         // scrolls (marquee) instead of running off the edge
@@ -2750,7 +2967,7 @@ Are you sure you want to continue?`,
       el.classList.toggle("sel", isSel); el.classList.add("grid-cell");
       el.style.left = `${sx + (GRID_X0 + c * GRID_DX) / 1920 * w}px`;
       el.style.top = `${sy + dy(r)}px`;
-      el.style.opacity = "1";
+      dimTo(el, "1");
       el.style.zIndex = isSel ? "5" : "1";
       el.style.visibility = Math.abs(r) > 4 ? "hidden" : "visible";
       this._gridCell(el, isSel, w, h);
@@ -2862,6 +3079,8 @@ Are you sure you want to continue?`,
 
   // --------------------------------------------------------- selection FX
   _onSelect() {
+    this._syncGlowPulse();
+    if (window.__syncGlows) window.__syncGlows();   // (main.js: every glow on one clock)
     this._armIdle();
     clearTimeout(this.dwellTimer); this._stopGameMedia(); this._reveal = false;
     const it = this._level().items[this._level().sel];
@@ -2954,7 +3173,8 @@ Are you sure you want to continue?`,
         frame.appendChild(v); if (!gif) v.play().catch(() => {}); this._previewVid = v;
       }
     }
-    if (g.music && this.user && this.user.musicEnabled !== false) this.audio.playMusic(assetUrl(g.music));
+    // (the game's own music: not the Background Music, so it plays with that off too)
+    if (g.music && this.user) this.audio.playMusic(assetUrl(g.music), 0.5, true);
   }
   _stopGameMedia() {
     if (this._previewVid) {
@@ -2994,18 +3214,103 @@ Are you sure you want to continue?`,
     const friendMenu = it.childrenFn === this._friendPersonalizationItems;
     // a folder of pictures: shown as a grid, five to a row (as on the console)
     const grid = (children || []).length > 0 && children.every((c) => c.kind === "photo");
+    const snap = this._drillSnap();
     this.levels.push({ items: children, sel: 0, head: { icon: it.icon, label: it.title }, friendMenu, grid, inFolder: true,
       rebuild: it.childrenFn ? () => it.childrenFn.call(this) : null });
     this._render(); this._onSelect();
+    this._drillAnim(snap, 1);
   }
   _back() {
     if (this.overlay) return;
     if (this.levels.length > 1) {
       this.audio.play("back", 0.5);
+      const snap = this._drillSnap();
       const leaving = this.levels.pop();
       // leaving Friend Personalization → apply count/mode/card changes now
       if (leaving && leaving.friendMenu && this._friendMenuDirty) this._refreshFriendsColumn();
       this._render(); this._onSelect();
+      this._drillAnim(snap, -1);
+    }
+  }
+  // Going into a menu and back out of it moves, as on the console: the chosen
+  // row slides to its place on the left (or back to the middle), the rows
+  // around it slide with it and dim, the categories gather (or spread out), and
+  // the opened list comes in from the right (or goes back out to it). The menu
+  // is drawn anew each time, so where everything was is noted first
+  // (_drillSnap) and the new rows start from there (_drillAnim), using the
+  // menu's own movement.
+  _drillSnap() {
+    const pos = (el) => el && el.isConnected ? { left: el.style.left, top: el.style.top, opacity: el.style.opacity } : null;
+    const active = this.levels[this.levels.length - 1];
+    const snap = { active, anchors: new Map(), ghosts: new Map(), items: new Map(), cats: new Map(), old: [] };
+    for (const lvl of this.levels) {
+      if (lvl !== active && lvl._anchorEl) snap.anchors.set(lvl, pos(lvl._anchorEl));
+      if (lvl !== active && lvl._ghosts) for (const g of lvl._ghosts) snap.ghosts.set(lvl.items[g.j], pos(g.el));
+    }
+    if (active) for (const it of active.items) if (it && it._el && it._el.isConnected) { snap.items.set(it, pos(it._el)); snap.old.push(it._el); }
+    (this.columns || []).forEach((c) => { if (c._el) snap.cats.set(c, pos(c._el)); });
+    return snap;
+  }
+  _drillAnim(snap, dir) {
+    if (!snap || !this.$items) return;
+    const w = this.root.clientWidth;
+    const moved = [];
+    // (an element put where it was, then let go: it moves to its new place)
+    const from = (el, p, dx = 0, opacity = null, stay = false) => {
+      if (!el || !p || !p.left) return;
+      // (stay: only fades, where it was)
+      moved.push([el, stay ? null : el.style.left, stay ? null : el.style.top, el.style.opacity]);
+      el.style.transition = "none"; el.classList.remove("fresh");   // (a new row: it moves at once)
+      el.style.left = `${(parseFloat(p.left) || 0) + dx}px`; el.style.top = p.top;
+      el.style.opacity = opacity != null ? opacity : p.opacity;
+    };
+    const active = this.levels[this.levels.length - 1];
+    // the chosen category moves with the menu; the others fade where they are
+    (this.columns || []).forEach((c, i) => {
+      const p = snap.cats.get(c); if (!c._el || !p) return;
+      if (i === this.selCat) from(c._el, p);
+      else if (dir > 0) from(c._el, p, 0, null, true);
+      else from(c._el, { left: c._el.style.left, top: c._el.style.top }, 0, "0");
+    });
+    for (const lvl of this.levels) {
+      if (lvl !== active && lvl._anchorEl) {
+        // an ancestor: from where it was, or (just opened) from its row in the list
+        from(lvl._anchorEl, snap.anchors.get(lvl) || (lvl === snap.active ? snap.items.get(lvl.items[lvl.sel]) : null));
+        if (lvl._ghosts) for (const g of lvl._ghosts) {
+          const it = lvl.items[g.j];
+          from(g.el, snap.ghosts.get(it) || snap.items.get(it));
+        }
+      }
+    }
+    if (active && !active.grid) {
+      const back = dir < 0;
+      for (const it of active.items) {
+        if (!it || !it._el) continue;
+        if (back) {
+          // the list we're back in: its rows come back from the left
+          const isSel = it === active.items[active.sel];
+          const p = isSel ? snap.anchors.get(active) : snap.ghosts.get(it);
+          if (p) from(it._el, p, 0, isSel ? null : "0");
+          else if (!isSel && it._el.style.left) from(it._el, { left: it._el.style.left, top: it._el.style.top }, -0.04 * w, "0");
+        } else {
+          // the list just opened: in from the right
+          const L = it._el.style.left, T = it._el.style.top;
+          if (L) from(it._el, { left: L, top: T }, 0.06 * w, "0");
+        }
+      }
+    } else if (active && active.grid) {
+      for (const it of active.items) if (it && it._el) from(it._el, { left: it._el.style.left, top: it._el.style.top }, dir > 0 ? 0.06 * w : 0, "0");
+    }
+    // the list we left: back out to the right, fading
+    const leaving = dir < 0 ? snap.old.filter((el) => !el.isConnected) : [];
+    for (const el of leaving) { el.style.transition = "none"; this.$items.appendChild(el); el.style.pointerEvents = "none"; }
+    if (!moved.length && !leaving.length) return;
+    void this.$items.offsetWidth;
+    for (const [el, L, T, O] of moved) { el.style.transition = ""; if (L != null) { el.style.left = L; el.style.top = T; } el.style.opacity = O; }
+    for (const el of leaving) {
+      el.style.transition = "";
+      el.style.left = `${(parseFloat(el.style.left) || 0) + 0.06 * w}px`; el.style.opacity = "0";
+      setTimeout(() => { if (!this.$items || !this.$items.contains(el)) return; el.remove(); }, 320);
     }
   }
 
@@ -3048,7 +3353,7 @@ Are you sure you want to continue?`,
   _accountOptions(it) {
     const el = it._el;
     this._triBand(el);
-    const done = () => { this.overlay = null; if (el) el.classList.remove("gm-band"); };
+    const done = () => { this.overlay = null; if (el) { el.classList.remove("gm-band"); this._triZoom(el, false); } };
     this.overlay = this.gameMenu;
     this.gameMenu.open({ withBg: this.$bg.classList.contains("show"), top: [],
       lower: [{ id: "signout", label: "Sign Out" }, { id: "autooff", label: "Auto Sign-In Off" }],
@@ -3116,17 +3421,32 @@ Are you sure you want to continue?`,
     // (IMG_3679 / IMG_3680: the band is 23 % of the screen tall, centred 0.8 %
     // below the icon's middle; it starts 4.1 % left of a game's picture (grown
     // 1.36 x while the panel is open) and is fully in 5.8 % further right)
-    const grow = el.classList.contains("item-game") ? 1.36 : 1;
+    // (IMG_3737: a game's band is exactly as tall as its picture, grown)
+    // (IMG_3733 -> IMG_3734, IMG_3735 -> IMG_3736: a user's picture and
+    // Account Management's icon grow 1.26 x too, see _triZoom)
+    const game = el.classList.contains("item-game"), grow = game ? 1.36 : TRI_ZOOM;
     const artL = art.left + art.width / 2 - art.width * grow / 2;
     const left = Math.max(0, artL - 4.1 * vw), width = Math.max(1, (50 * vw - left) * 2);
     const fade = Math.min(48, Math.max(1, 5.8 * vw / width * 100));
-    const midY = art.top + art.height / 2 + 0.8 * vh, bandH = 23 * vh;
+    const midY = art.top + art.height / 2 + (game ? 0 : 0.8 * vh), bandH = game ? art.height * grow : 23 * vh;
     el.style.setProperty("--band-l", `${left - ir.left}px`);
     el.style.setProperty("--band-t", `${midY - bandH / 2 - ir.top}px`);
     el.style.setProperty("--band-h", `${bandH}px`);
     el.style.setProperty("--band-w", `${width}px`);
     el.style.setProperty("--band-f", `${fade.toFixed(2)}%`);
     el.classList.add("gm-band");
+    if (!game) this._triZoom(el, true);
+  }
+  // a user's / Account Management's △ panel (IMG_3734, IMG_3736): its icon
+  // grows 1.26 x about its middle and its name moves right; the rows above
+  // move up and the rows below move down, their names hidden
+  _triZoom(el, on) {
+    const items = (this._level()?.items || []).map((it) => it._el).filter(Boolean), at = items.indexOf(el);
+    items.forEach((e, j) => {
+      e.classList.toggle("tri-zoom", on && j === at);
+      e.classList.toggle("tri-up", on && at >= 0 && j < at);
+      e.classList.toggle("tri-down", on && at >= 0 && j > at);
+    });
   }
   _browserSearch(q) {
     if (this._browserActive || this._browserBusy) return;
@@ -3180,8 +3500,18 @@ Are you sure you want to continue?`,
   // a program / script from a custom section: started like a game, but the
   // app keeps its sound and its screen (no black screen, nothing muted)
   async _launchApp(game) {
-    const r = await call("launch_game", { folder: game.folder, launch: game.launch, args: game.args || [] }).catch(() => null);
-    if (!r || r.ok === false) this.audio.play("error", 0.5);
+    // (program: the app's screen stays showing while it runs)
+    const r = await call("launch_game", { folder: game.folder, launch: game.launch, args: game.args || [], program: true }).catch(() => null);
+    if (!r || r.ok === false) { this.audio.play("error", 0.5); return; }
+    // (the program is followed like a game, the app stepping aside; once the
+    // user is back in the app, it's itself again at once: its priority, the
+    // controller, even with the program still open)
+    this._appWatchOff && this._appWatchOff();
+    let left = false;
+    const onBlur = () => { left = true; };
+    const off = this._appWatchOff = () => { window.removeEventListener("blur", onBlur); window.removeEventListener("focus", onFocus); if (this._appWatchOff === off) this._appWatchOff = null; };
+    const onFocus = () => { if (!left) return; off(); call("game_mode_end").catch(() => {}); };
+    window.addEventListener("blur", onBlur); window.addEventListener("focus", onFocus);
   }
   async _launch(game) {
     // Game mode: fade to black, silence the whole app (whatever Play Audio in
@@ -3195,6 +3525,7 @@ Are you sure you want to continue?`,
     // the screen dissolves into black first (the menu, the wave and the music
     // fading out with it), and only then does everything stop and the game start
     if (this._launching) return;
+    this._appWatchOff && this._appWatchOff();   // (a program started before: the game's own watch from now on)
     this._launching = true;   // (no input meanwhile: see onInput)
     fb.classList.add("show");
     const music = [this.audio.bg, this.audio.preview].filter((a) => a && !a.paused);
@@ -3214,30 +3545,41 @@ Are you sure you want to continue?`,
     this.audio.enterGame(); this._inGame = true; this.setLowPower(2);
     music.forEach((a, i) => { a.volume = vols[i]; });   // (paused by enterGame; back at their volume for later)
     document.body.classList.add("in-game");
+    // (the Music Player's sound graph, if it was used: stopped too, until the user is back)
+    const tapCtx = this.musicPlayer?._tap?.ctx, tapWas = tapCtx && tapCtx.state === "running";
+    if (tapWas) tapCtx.suspend().catch(() => {});
     const r = await call("launch_game", { folder: game.folder, launch: game.launch, args: game.args || [] }).catch(() => null);
-    let unlisten = null, armed = false, onFocus = null, vis = null;
+    let unlisten = null, armed = false, vis = null, onKey = null;
+    const startedAt = performance.now();
     const restore = () => {
       if (!this._inGame) return;
-      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("keydown", onKey, true);
       document.removeEventListener("visibilitychange", vis);
       if (unlisten) { try { unlisten(); } catch (e) {} }
       call("game_mode_end").catch(() => {});
+      // (in the log: the page itself is back, not only the window)
+      logLine("info", `back from the game: the menus show again (page ${document.visibilityState}, ${document.hasFocus() ? "with" : "without"} the focus)`);
       document.body.classList.remove("in-game");
       fb.classList.remove("show");
       this._inGame = false; this.setLowPower(document.hasFocus() ? 0 : 1);
       this.audio.enabled = this.user?.soundEnabled !== false;
       this.audio.musicEnabled = this.user?.musicEnabled !== false;
       this.audio.leaveGame();
+      if (tapWas) tapCtx.resume().catch(() => {});
       this._onSelect();
     };
     if (!r || r.ok === false) { restore(); setTimeout(() => this.audio.play("error", 0.5), 300); return; }
-    // the app still has the focus right after the launch: only a focus that
-    // comes back after the game took it counts as "the user is back"
-    onFocus = () => { if (armed) restore(); };
+    // The user back in the app: the backend tells (it hides the page once the
+    // game's own window is in front, and shows it again when the window gets
+    // the focus back: the page coming back into view ends game mode). The
+    // window's focus alone doesn't: a launcher's window (Steam's "launching"
+    // box) closing gives it back while the game is still loading.
     vis = () => { if (document.hidden) armed = true; else if (armed) restore(); };
-    window.addEventListener("blur", () => { armed = true; }, { once: true });
-    window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", vis);
+    // (the app has the keyboard while the game should be running: the game
+    // ended, or never showed, without the app noticing: a key brings it back)
+    onKey = () => { if (performance.now() - startedAt > 6000 && document.hasFocus()) restore(); };
+    window.addEventListener("keydown", onKey, true);
     const ev = window.__TAURI__?.event;
     if (ev?.listen) ev.listen("game-exited", restore).then((u) => { unlisten = u; if (!this._inGame) u(); });
   }
@@ -3275,8 +3617,8 @@ Are you sure you want to continue?`,
     this._migrateWaveSettings(); this._migrateWaveV3();
     this.wave.setColor(user.theme?.backgroundColor || "auto");
     this._applyWaveStyle();
-    applyIconColorVar(user.theme?.iconColor || "#ffffff");
-    this._applyIconStyle();
+    PLAYER_OWN = user.theme?.iconColorAll === false; applyIconColorVar(this._pickHex(user.theme));
+    this._applyIconStyle(); this._rememberIconStyle();
     this._applyTextLook();
     await this._applyThemes(false, true);
     this._applyWallpaper();
@@ -3322,7 +3664,7 @@ Are you sure you want to continue?`,
     const lvl = this._level(), it = lvl.items[lvl.sel], el = it && it._el;
     const current = !!(this.user && this.user.id === user.id);
     this._triBand(el);
-    const done = () => { this.overlay = null; if (el) el.classList.remove("gm-band"); };
+    const done = () => { this.overlay = null; if (el) { el.classList.remove("gm-band"); this._triZoom(el, false); } };
     const lower = [
       ...(current ? [{ id: "logout", label: "Log Out" }] : []),
       { id: "autologin", label: "Automatic Login", sub: true },
@@ -3495,7 +3837,12 @@ Are you sure you want to continue?`,
   // ------------------------------------------------------------- settings
   // Build the "Wave and Sparkles Personalization" submenu: one adjustable setting per linkev
   // spline/particle parameter, plus a reset action. Adjusted with Left/Right.
-  _activeWaveMeta() { return WAVE_PARAM_META; }
+  // (with the Original wave: only the settings it follows)
+  _activeWaveMeta() {
+    const orig = this._waveIsOriginal();
+    return orig ? WAVE_PARAM_META.filter((m) => ORIGINAL_SHARED.has(m[0] + ":" + m[1])).map(origMeta) : WAVE_PARAM_META;
+  }
+  _waveIsOriginal() { return this.wave?.activeWaveStyle ? this.wave.activeWaveStyle() === "original" : this._waveEngine() === "original"; }
   // Wave and Sparkles Personalization: the wave's colour settings (the
   // background gradient behind it and the wave's own colour and light), the
   // wave's other settings, the sparkles' colour settings, the sparkles' other
@@ -3574,7 +3921,9 @@ Are you sure you want to continue?`,
   _themeSnap() {
     const t = this.user.theme;
     return {
-      backgroundColor: t.backgroundColor, iconColor: t.iconColor, iconStyle: t.iconStyle,
+      // (the Icon Style and Wave Style in use, even for a user who never chose
+      // one and so is shown this computer's last ones: a theme always carries them)
+      backgroundColor: t.backgroundColor, iconColor: t.iconColor, iconColorAll: t.iconColorAll !== false, iconStyle: this._iconStyle(), waveEngine: this._waveEngine(),
       waveColor: t.waveColor, dotColor: t.dotColor, monthColors: t.monthColors ?? null,
       wavesEnabled: t.wavesEnabled, dotsEnabled: t.dotsEnabled, wallpaper: t.wallpaper || null, overlay: t.overlay || null,
       chromaKey: t.chromaKey || null, chromaStrength: t.chromaStrength ?? null, wallpaperFit: t.wallpaperFit || null,
@@ -3611,6 +3960,8 @@ Are you sure you want to continue?`,
       bgShuffle: s.bgShuffle || undefined, ovShuffle: s.ovShuffle || undefined, bgInterval: s.bgInterval || undefined, ovInterval: s.ovInterval || undefined,
       waveParams: { ...(s.waveParams || {}) },
     });
+    if ("waveEngine" in s) t.waveEngine = s.waveEngine || undefined;
+    if ("iconColorAll" in s) t.iconColorAll = s.iconColorAll !== false;
     if ("psnStyle" in s) t.psnStyle = s.psnStyle || undefined;
     if ("homeStyle" in s) t.homeStyle = s.homeStyle || undefined;
     if (s.customColors) t.customColors = { ...s.customColors };
@@ -3621,8 +3972,8 @@ Are you sure you want to continue?`,
     this.wave.setColor(t.backgroundColor || "auto");
     if (t.waveParams) this.wave.applyWaveParams(t.waveParams);
     this._applyWaveStyle();
-    applyIconColorVar(t.iconColor || "#ffffff");
-    this._applyIconStyle();
+    PLAYER_OWN = t?.iconColorAll === false; applyIconColorVar(this._pickHex(t));
+    this._applyIconStyle(); this._rememberIconStyle();
     this._applyTextLook();
     this._applyWallpaper();
     this._restartRotation();
@@ -3649,9 +4000,9 @@ Are you sure you want to continue?`,
   }
   _waveParamMeta(ctl) {
     const [, group, key] = ctl.split(":");
-    const m = WAVE_PARAM_META.find((e) => e[0] === group && e[1] === key)
-      ;
+    let m = WAVE_PARAM_META.find((e) => e[0] === group && e[1] === key);
     if (!m) return null;
+    if (this._waveIsOriginal() && ORIGINAL_SHARED.has(group + ":" + key)) m = origMeta(m);
     // the smallest step: 1 for whole numbers, 0.01 (or finer) otherwise
     const dec = m[6] === 0 ? 0 : Math.max(2, m[6]);
     return { group, key, min: m[3], max: m[4], step: Math.min(m[5], 10 ** -dec), dec, labels: m[8] || null };
@@ -3717,8 +4068,10 @@ Are you sure you want to continue?`,
       case "chromakey": { const k = String(u?.theme?.chromaKey || "green").toLowerCase();
         return k === "green" ? "Green" : k === "blue" ? "Blue" : "Custom Color"; }
       case "iconcolor": return colorName(u?.theme?.iconColor, true);
+      case "iconcoloron": return u?.theme?.iconColorAll === false ? "Off" : "On";
       case "waves": return u?.theme?.[this._wk("wavesEnabled")] === false ? "Off" : "On";
       case "monthcolors": return u?.theme?.[this._wk("monthColors")] === false ? "Off" : "On";
+      case "wavestyle": return this._waveEngine() === "linkev" ? "linkev" : (this.wave.originalFailReason && this.wave.originalFailReason() ? "Original (unavailable: linkev shown)" : "Original");
       case "wavecolor": return colorName(u?.theme?.[this._wk("waveColor")], true);
       case "dots": return u?.theme?.[this._wk("dotsEnabled")] === false ? "Off" : "On";
       case "dotcolor": return colorName(u?.theme?.[this._wk("dotColor")], true);
@@ -3755,7 +4108,7 @@ Are you sure you want to continue?`,
       case "nomenublur": return s?.behavior?.noMenuBlur ? "On" : "Off";
       case "lowpower": return s?.behavior?.lowPowerMode ? "On" : "Off";
       case "vkb": return s?.behavior?.virtualKeyboard === false ? "Off" : "On";
-      case "iconstyle": return { default: "Default", glossy: "Glossy", flat: "Flat" }[this._iconStyle()];
+      case "iconstyle": return Object.fromEntries(ICON_STYLES)[this._iconStyle()];
       case "resolution": { const r = s?.behavior?.resolution || "native"; return r === "native" ? "Native" : r.replace("x", " × "); }
       case "psnstyle": return u?.theme?.psnStyle === "modern" ? "Modern Version" : "Original Version";
       case "homestyle": return u?.theme?.homeStyle === "modern" ? "Modern Version" : "Original Version";
@@ -3787,18 +4140,37 @@ Are you sure you want to continue?`,
       case "bgshuffle": case "ovshuffle": this._cycleShuffle(it.ctl, 1); return;
       case "bginterval": case "ovinterval": this._typeInterval(it); return;
       case "monthcolors": { const k = this._wk("monthColors"); u.theme[k] = u.theme[k] === false; this.wave.setMonthMode(u.theme[k]); this._persistUser(); break; }
+      case "wavestyle": {
+        u.theme.waveEngine = this._waveEngine() === "linkev" ? "original" : "linkev";
+        // (the system starts with the Wave Style chosen last: this computer's setting)
+        (this.settings.graphics ||= {}).waveStyle = u.theme.waveEngine; this._persistSettings();
+        // (Original chosen by hand: tried again, even if it couldn't run before)
+        if (u.theme.waveEngine === "original" && this.wave.retryOriginal) this.wave.retryOriginal();
+        this._applyWaveStyle(); this._applyWallpaper(); this._persistUser(); break;
+      }
       case "waves": { const k = this._wk("wavesEnabled"); u.theme[k] = u.theme[k] === false; this._applyWaveLook(); this._persistUser(); break; }
       case "dots": { const k = this._wk("dotsEnabled"); u.theme[k] = u.theme[k] === false; this._applyWaveLook(); this._persistUser(); break; }
       case "sfx": u.soundEnabled = u.soundEnabled === false; this.audio.enabled = u.soundEnabled; this._persistUser(); break;
       case "bgaudio": s.behavior.playAudioBackground = s.behavior.playAudioBackground === false; this.audio.playInBackground = s.behavior.playAudioBackground; this._persistSettings(); break;
       case "keepsongs": s.behavior.keepPreloadedSongs = !s.behavior.keepPreloadedSongs; this._persistSettings(); break;
       case "mpvisualizer": s.behavior.mpVisualizer = s.behavior.mpVisualizer === false; this._persistSettings(); this._syncVisualizer(); break;
+      case "iconcoloron": {
+        u.theme.iconColorAll = u.theme.iconColorAll === false; this._persistUser();
+        PLAYER_OWN = this.user?.theme?.iconColorAll === false; applyIconColorVar(this._pickHex());
+        this._runLocked("theme", "Please wait...", () => this._applyThemes(true).catch((e) => console.warn("theme", e)))
+          .then(() => this._layoutItems(this.root.clientWidth, this.root.clientHeight));
+        break;
+      }
       case "gamenotitle": s.behavior.gameHideTitle = !s.behavior.gameHideTitle; this._persistSettings(); this._render(); this._onSelect(); break;
       case "gameband": s.behavior.gameBand = s.behavior.gameBand === false; this._persistSettings(); this._render(); this._onSelect(); break;
       case "keepvideos": s.behavior.keepPreloadedVideos = !s.behavior.keepPreloadedVideos; this._persistSettings(); break;
       case "deltemp": s.behavior.deleteTempFiles = !s.behavior.deleteTempFiles; this._persistSettings(); break;
       case "scrapeauto": this._scrapeCfg().auto = s.scrape.auto === false; this._persistSettings(); break;
-      case "cacheapp": s.behavior.cacheInAppDir = !s.behavior.cacheInAppDir; this._persistSettings(); break;
+      case "cacheapp": s.behavior.cacheInAppDir = !s.behavior.cacheInAppDir;
+        // (the Wave Cache saved again in its new place; the Visualizers Cache let go when it's no longer kept)
+        this._persistSettings().then(() => moveWaveCache());
+        if (!s.behavior.cacheInAppDir) this.musicPlayer.freeVisuals();
+        break;
       case "music": u.musicEnabled = u.musicEnabled === false; this.audio.musicEnabled = u.musicEnabled; this._applyBgMusic(); this._persistUser(); break;
       case "fullscreen": s.behavior.fullscreen = !s.behavior.fullscreen; call("set_fullscreen", { enable: s.behavior.fullscreen }); this.cbs.onFullscreen && this.cbs.onFullscreen(s.behavior.fullscreen); this._persistSettings();
         setTimeout(() => this._applyResolution(), 350); break;
@@ -3846,12 +4218,25 @@ Are you sure you want to continue?`,
   _applyWaveStyle() {
     const t = this.user?.theme || {}, player = this._visPlayer(), bg = this._bgLook(), wl = this._waveLook();
     this._lookApplied = this._lookKey();
-    this.wave.setStyle("real");
+    this.wave.setStyle(this._waveEngine());
+    const ov = this._origVisFiles();
+    if (this.wave.setOverlay) this.wave.setOverlay(ov ? "music_1" : null, ov);
     this.wave.resetWaveParams();               // start from defaults…
-    if (bg) this.wave.applyWaveParams(bg.params);   // (a Background Color's own gradient)
-    if (wl) this.wave.applyWaveParams(wl.params);   // (the Visualizer Wave's wave and sparkles)
+    if (bg && !(ov && bg === VISUALIZER_BG)) this.wave.applyWaveParams(this._squareParams(bg));   // (a Background Color's own gradient)
+    if (wl && !ov) this.wave.applyWaveParams(wl.params);   // (the Visualizer Wave's wave and sparkles)
     if (t.waveParams && !player) this.wave.applyWaveParams(t.waveParams);  // …then the user's overrides
     this._applyWaveLook();
+  }
+  // A Background Color square's settings for the Wave Style in use (the
+  // Original wave has its own, fitted to the console: ORIG_SQUARES)
+  _squareOrig(bg) { return bg && bg.name && this._waveEngine() === "original" && !(this.wave?.originalFailReason && this.wave.originalFailReason()) ? ORIG_SQUARES[bg.name] || null : null; }
+  _squareParams(bg) {
+    const o = this._squareOrig(bg);
+    if (!o) return bg.params;
+    const b = waveParamDefault("spline", "brightness");
+    return { ...bg.params, "spline:bgTopR": o.top[0], "spline:bgTopG": o.top[1], "spline:bgTopB": o.top[2],
+      "spline:bgBotR": o.bot[0], "spline:bgBotG": o.bot[1], "spline:bgBotB": o.bot[2], ...(o.curve ? { "spline:bgCurve": o.curve } : {}),
+      ...(o.gain !== 1 ? { "spline:brightness": b * o.gain } : {}) };
   }
   // the Music Player showing the Visualizer Wave (Music Settings > Music Player Visualizer Wave)
   _visPlayer() { return !!this._inMusicPlayer && this.settings?.behavior?.mpVisualizer !== false; }
@@ -3864,8 +4249,25 @@ Are you sure you want to continue?`,
   }
   // Wave Color > Visualizer Wave: its wave and sparkles
   _waveLook() {
-    if (this._visPlayer()) return VISUALIZER_WAVE;
-    return this.user && this._tcol("waveColor") === "visualizer" ? VISUALIZER_WAVE : null;
+    if (this._visPlayer()) return this._visWave();
+    return this.user && this._tcol("waveColor") === "visualizer" ? this._visWave() : null;
+  }
+  _visWave() { return VISUALIZER_WAVE; }
+  // With the Original wave, the Visualizer is the console's own: its Music
+  // Player preset (lines.qrc override/music_1), faded in over the time of day,
+  // for the parts that are on Visualizer: the background (BACKGROUND, HDR),
+  // the wave and sparkles (LINE1, PARTICLES), or all of it (the Music Player).
+  // null: not in use (linkev's draws its own Visualizer look instead)
+  _origVisFiles() {
+    const orig = this._waveEngine() === "original" && !(this.wave?.originalFailReason && this.wave.originalFailReason());
+    if (!orig) return null;
+    if (this._visPlayer()) return ["BACKGROUND", "HDR", "LINE1", "PARTICLES"];
+    if (!this.user) return null;
+    const bgV = this._tcol("backgroundColor") === "visualizer", wV = this._tcol("waveColor") === "visualizer";
+    if (bgV && wV) return ["BACKGROUND", "HDR", "LINE1", "PARTICLES"];
+    if (bgV) return ["BACKGROUND", "HDR"];
+    if (wV) return ["LINE1", "PARTICLES"];
+    return null;
   }
   _lookKey() { return [this._visPlayer(), this._bgLook()?.params?.["spline:bgTopR"] ?? "", this._bgLook()?.swatch ?? (this._bgLook() ? "vis" : ""), !!this._waveLook()].join("|"); }
   // after a change of Background / Wave Color or the Music Player opening or
@@ -3874,8 +4276,12 @@ Are you sure you want to continue?`,
     document.body.classList.toggle("mpvis", this._visPlayer());
     if (this._lookKey() !== this._lookApplied) this._applyWaveStyle();
   }
-  // (there is one wave style now; kept as a helper so the setting code stays simple)
+  // (one set of wave settings, shared by both Wave Styles)
   _wk(prop) { return prop; }
+  // Wave Style: "original" (the PS3's own wave, the default) or "linkev"
+  // (a user's own choice; before anyone signs in, or a user who never chose:
+  // the one chosen last on this computer)
+  _waveEngine() { const v = this.user?.theme?.waveEngine || this.settings?.graphics?.waveStyle; return v === "linkev" ? "linkev" : "original"; }
   // The old "Default" wave style is gone: the first time a user signs in, the
   // wave settings they had for "Complex" become the settings, and the old
   // Default-style ones are dropped.
@@ -3906,9 +4312,12 @@ Are you sure you want to continue?`,
   }
   _applyWaveLook() {
     const t = this.user?.theme || {};
+    const ov = this._origVisFiles();
     if (this._visPlayer()) {
-      this.wave.setWaveColor(VISUALIZER_WAVE.wave); this.wave.setDotColor(VISUALIZER_WAVE.dot);
-      this.wave.setWavesEnabled(true); this.wave.setDotsEnabled(true); this.wave.setMonthMode(false);
+      const vw = this._visWave();
+      // (Original: the console's own Music Player look: its own colours)
+      this.wave.setWaveColor(ov ? "auto" : vw.wave); this.wave.setDotColor(ov ? "auto" : vw.dot);
+      this.wave.setWavesEnabled(true); this.wave.setDotsEnabled(true); this.wave.setMonthMode(!!ov);
       return;
     }
     // Original: the Visualizer Wave's (Wave Color > Visualizer Wave), or the
@@ -3916,13 +4325,16 @@ Are you sure you want to continue?`,
     // Wave background, drawn from it)
     const bg = this._bgLook(), wl = this._waveLook();
     const own = (k) => { const c = this._tcol(k); return !c || c === "auto" || c === "visualizer" ? null : c; };
-    this.wave.setWaveColor(own("waveColor") || wl?.wave || bg?.wave || "auto");
+    const ovWave = !!ov && ov.includes("LINE1"), ovBg = !!ov && ov.includes("BACKGROUND");
+    this.wave.setWaveColor(own("waveColor") || (ovWave ? null : wl?.wave) || (ovBg ? null : (this._squareOrig(bg)?.wave || bg?.wave)) || "auto");
     this.wave.setWavesEnabled(t.wavesEnabled !== false && customizationOn("waves"));
     // (Sparkles Color > Visualizer: the Visualizer Wave's sparkles)
-    this.wave.setDotColor(this._tcol("dotColor") === "visualizer" ? VISUALIZER_WAVE.dot : (own("dotColor") || wl?.dot || bg?.dot || "auto"));
+    this.wave.setDotColor(this._tcol("dotColor") === "visualizer" && !ovWave ? this._visWave().dot : (own("dotColor") || (ovWave ? null : wl?.dot) || (ovBg ? null : bg?.dot) || "auto"));
     this.wave.setDotsEnabled(t.dotsEnabled !== false && customizationOn("sparkles"));
     // Original: always the month's colour, brighter by day and darker by night
-    this.wave.setMonthMode(!bg);
+    // (always true / false: an unset value read as "on" kept the month's
+    // background after choosing a Background Color)
+    this.wave.setMonthMode(!bg || (!!ovBg && bg === VISUALIZER_BG));
   }
   // Theme colour settings cycle through their named colours, "Auto" (where it
   // exists) and "Custom Color", which opens the colour wheel picker.
@@ -3938,7 +4350,7 @@ Are you sure you want to continue?`,
     } else if (ctl === "chromakey") this._applyWallpaper();
     else if (ctl === "textcolor" || ctl === "clockcolor" || ctl === "clockiconcolor") this._applyTextLook();
     else if (ctl === "wavecolor" || ctl === "dotcolor") { this._syncVisualizer(); this._applyWaveLook(); }
-    else { applyIconColorVar(hex); this._applyXmbwShading(); }
+    else { PLAYER_OWN = this.user?.theme?.iconColorAll === false; applyIconColorVar(this._pickHex()); this._applyXmbwShading(); }
   }
   // ---- every setting is changed from its option (△) menu ------------------
   // ✕ or △ on a setting opens the PS3 option menu down the right: its choices
@@ -4059,14 +4471,20 @@ Are you sure you want to continue?`,
     // On / Off and the other two-way settings flip when the other one is chosen
     // (settings with a list of their own that can read "Off" aren't two-way)
     const listed = ["bgshuffle", "ovshuffle"].includes(ctl);
+    if (ctl === "wavestyle") return { items: [["original", "Original"], ["linkev", "linkev"]].map(([id, label]) => ({ label, apply: () => {
+        if (this._waveEngine() !== id) this._toggleSetting(it);
+        // (Original chosen again while linkev's is shown in its place: try it again)
+        else if (id === "original" && this.wave.originalFailReason && this.wave.originalFailReason() && this.wave.retryOriginal) { this.wave.retryOriginal(); this._applyWaveStyle(); this._render(); this._onSelect(); }
+      } })),
+      cur: this._waveEngine() === "linkev" ? 1 : 0 };
     const two = { timeformat: ["12-Hour Clock", "24-Hour Clock"], psnstyle: ["Original Version", "Modern Version"], homestyle: ["Original Version", "Modern Version"] }[ctl]
       || (!listed && (cur === "On" || cur === "Off") ? ["On", "Off"] : null);
     if (two) return { items: two.map((label) => ({ label, apply: () => { if (this._ctlValue(ctl) !== label) this._toggleSetting(it); } })), cur: two.indexOf(cur) };
     switch (ctl) {
       case "dateformat": return list(["DD/MM/YYYY", "MM/DD/YYYY", "YYYY/MM/DD"].map((f) => [f, f]), b.dateFormat || "DD/MM/YYYY",
         (v) => { b.dateFormat = v; this.cbs.onDateFormat && this.cbs.onDateFormat(v); this._persistSettings(); });
-      case "iconstyle": return list([["default", "Default"], ["glossy", "Glossy"], ["flat", "Flat"]], this._iconStyle(),
-        (v) => { t.iconStyle = v; this._persistUser(); this._applyIconStyle(); this._render(); this._onSelect(); });
+      case "iconstyle": return list(ICON_STYLES, this._iconStyle(),
+        (v) => { t.iconStyle = v; this._persistUser(); this._rememberIconStyle(); this._applyIconStyle(); this._render(); this._onSelect(); });
       case "fpscap": return list(FPS_CAPS.map((c) => [c, fpsCapLabel(c)]), fpsCapOf(b.fpsCap),
         (v) => { b.fpsCap = v; this._persistSettings(); this._applyPerformance(); });
       case "resolution": return list(RESOLUTIONS.map((r) => [r, r === "native" ? "Native" : r.replace("x", " × ")]), b.resolution || "native",
@@ -4119,9 +4537,6 @@ Are you sure you want to continue?`,
         this._applyThemeColor(it.ctl, prev || (it.ctl === "chromakey" ? "green" : "auto"));
         this._layoutItems(this.root.clientWidth, this.root.clientHeight); });
   }
-  // XMBW is the only icon style: the masked icons are replaced with the shaded
-  // glass material (XMP normal-mapped look). Full-colour brand icons are
-  // unaffected.
   // ---- PS3 Themes, Custom Themes and Icon Themes ----------------------------
   // The themes found (the Themes and Icon folders), read again each time
   // their menus open, so themes added while the system runs show up.
@@ -4146,10 +4561,10 @@ Are you sure you want to continue?`,
       delete t.customBackup; delete t.waveStyle;
       this.wave.resetWaveParams && this.wave.resetWaveParams();
       this._applyThemeSnap({
-        backgroundColor: "auto", iconColor: "auto", iconStyle: undefined, waveColor: "auto", dotColor: "auto", monthColors: undefined,
+        backgroundColor: "auto", iconColor: "auto", iconStyle: "glasslive", waveColor: "auto", dotColor: "auto", monthColors: undefined,
         wavesEnabled: true, dotsEnabled: true, wallpaper: null, overlay: null, chromaKey: null, chromaStrength: null, wallpaperFit: null,
         font: null, fontSize: null, textColor: null, clockColor: null, clockIconColor: null, bgShuffle: null, ovShuffle: null, bgInterval: null, ovInterval: null,
-        waveParams: {}, psnStyle: null, homeStyle: null,
+        waveParams: {}, psnStyle: null, homeStyle: null, waveEngine: null, iconColorAll: true,
       }, false);
       this._persistUser();
       await this._runLocked("theme", "Please wait...", () => this._applyThemes(true).catch((e) => console.warn("theme", e)));
@@ -4168,10 +4583,10 @@ Are you sure you want to continue?`,
   // A theme's icons loaded up front (as blob: copies, so they're drawn and
   // shaded like the system's own) and their shading made for the current Icon
   // Style and Color, so every menu shows them at once.
-  async _themeIconUrls(th) {
+  async _themeIconUrls(th, skip = null) {
     const cache = this._themeBlobs || (this._themeBlobs = new Map());
     const out = {};
-    await Promise.all(Object.entries(th.icons || {}).map(async ([name, path]) => {
+    await Promise.all(Object.entries(th.icons || {}).filter(([name]) => !skip || !skip.has(name)).map(async ([name, path]) => {
       let u = cache.get(path);
       if (!u) {
         try { u = URL.createObjectURL(await (await fetch(assetUrl(path))).blob()); cache.set(path, u); } catch (e) { return; }
@@ -4195,8 +4610,16 @@ Are you sure you want to continue?`,
           const cx = cv.getContext("2d", { willReadFrequently: true });
           cx.drawImage(img, 0, 0);
           const id = cx.getImageData(0, 0, w, h), d = id.data;
-          // (alpha x 6: faint glass becomes solid, the outermost edge pixels stay soft)
-          for (let i = 3; i < d.length; i += 4) d[i] = Math.min(255, d[i] * 6);
+          // the picture's body made fully solid, its edges as soft as they were:
+          // every alpha raised by the same amount, so the body's usual alpha
+          // (most of its solid-looking pixels) becomes 1 (raising them six times
+          // over, as before, made the soft edge pixels hard: jagged icons)
+          const body = [];
+          for (let i = 3; i < d.length; i += 4) if (d[i] >= 96) body.push(d[i]);
+          body.sort((a, b) => a - b);
+          const typical = body.length ? body[Math.floor(body.length * 0.5)] : 255;
+          const k = Math.min(6, 255 / Math.max(1, typical));
+          for (let i = 3; i < d.length; i += 4) d[i] = Math.min(255, Math.round(d[i] * k));
           cx.putImageData(id, 0, 0);
           const blob = await new Promise((r) => cv.toBlob(r, "image/png"));
           s = URL.createObjectURL(blob); cache.set(u, s);
@@ -4211,7 +4634,7 @@ Are you sure you want to continue?`,
     if (!layer || document.documentElement.getAttribute("data-icons") !== "xmbw") return;
     const c = layer.opts.iconColor, s = layer.opts.iconStyle;
     if (!s) return;
-    const st = this._iconStyle(), own = !c, rgb = own ? [1, 1, 1] : this._iconRgb();
+    const st = this._shadeStyle(), own = !c, rgb = own ? [1, 1, 1] : this._iconRgb();
     for (const [name, u] of Object.entries(layer.icons)) {
       const key = `t:${layer.key}|${name}${layer.opts.iconAlpha === false ? "|solid" : ""}${own ? "|own" : ""}`;
       const img = loadedIcon(u);
@@ -4229,11 +4652,17 @@ Are you sure you want to continue?`,
       // (unpacking a new theme takes a moment the first time)
       try { await this._loadThemes(); } catch (e) { this._themeLists = { p3t: [], icon: [], custom: [], sound: [] }; }
     }
-    const pick = async (kind) => {
+    // (Icon Color is On unless turned off; the earlier key, Off to begin with, isn't used)
+    if (this.user && "iconColorOn" in t) delete t.iconColorOn;
+    // (only the pictures that will show are loaded: a lower layer's icon that
+    // a higher one has too (Icon Set > Custom Theme > PS3 theme) is left out)
+    const pick = async (kind, above = []) => {
       const key = t[this._themeProp(kind)], th = key ? this._themeFind(kind, key) : null;
       if (!th) return null;
       // (a Custom Theme's icons are part of it: always shown as it was made)
-      const opts = kind === "custom" ? { iconColor: true, iconStyle: true, waves: true, sparkles: true, background: true, overlay: true } : this._themeOpts(th.key);
+      const opts = kind === "custom" ? { iconStyle: true, waves: true, sparkles: true, background: true, overlay: true } : this._themeOpts(th.key);
+      // (Icons > Icon Color: every theme's icons in your Icon Color Pick, or in their own colours)
+      opts.iconColor = t.iconColorAll !== false;
       // (Transparency is an Icon Set's own option, Off to begin with; a PS3
       // theme's and a Custom Theme's icons stay see-through like the system's)
       if (kind !== "icon") opts.iconAlpha = true;
@@ -4242,24 +4671,43 @@ Are you sure you want to continue?`,
       // (a PS3 theme's background turned off: your own background and overlay take its place)
       if (kind === "p3t" && !opts.tBackground) Object.assign(opts, { background: true, overlay: true });
       const useIcons = kind !== "p3t" || opts.tIcons;
-      let icons = useIcons ? await this._themeIconUrls(th) : {};
+      const hidden = new Set(above.flatMap((l) => (l ? Object.keys(l.icons) : [])));
+      if (kind === "p3t") for (const n of P3T_KEEP) hidden.add(n);
+      let icons = useIcons ? await this._themeIconUrls(th, hidden) : {};
       // (an Icon Set with Transparency off: its pictures made fully solid first)
       if (opts.iconAlpha === false) icons = await this._solidIconUrls(icons);
       return { key: th.key, icons, opts, theme: th };
     };
-    const [p, ic, cu] = await Promise.all([pick("p3t"), pick("icon"), pick("custom")]);
+    const ic = await pick("icon"), cu = await pick("custom", [ic]), p = await pick("p3t", [ic, cu]);
+    // a Custom Theme made over a PS3 theme's background and / or overlay: its own
+    // copy of them, each part as it was saved (and on unless turned off in the
+    // Custom Theme's Theme Settings), shown in place of a PS3 theme's in use;
+    // with them your own settings stay as they were with that PS3 theme (its
+    // Custom Settings then: waves, sparkles, your background and overlay)
+    const cps = this._customP3t(cu?.theme);
+    if (cps) Object.assign(cu.opts, cps.opts);
     setActiveThemes(p, ic, cu);
+    // (the pictures of layers no longer in use let go of, once the menus drawn with them are gone)
+    if (this._themeBlobs) {
+      const used = new Set([p, ic, cu].flatMap((l) => (l ? Object.values(l.icons) : [])));
+      const drop = [...this._themeBlobs].filter(([, u]) => !used.has(u));
+      for (const [k] of drop) this._themeBlobs.delete(k);
+      if (drop.length) setTimeout(() => { for (const [, u] of drop) URL.revokeObjectURL(u); }, 10000);
+    }
     for (const l of [p, ic, cu]) this._preshadeTheme(l);
     // the PS3 theme's own parts that are on
     const on = (part) => (p && p.opts[part] ? p.theme : null);
     if (!this.themeBg) this.themeBg = new ThemeBackground(document.getElementById("p3tbg"));
     // its background and its overlay (an animated theme's moving effects), each on or off
-    const bgOn = !!on("tBackground"), ovOn = !!(on("tOverlay") && p.theme.scene);
-    const layers = bgOn && ovOn ? "all" : bgOn ? (p.theme.scene ? "bg" : "all") : ovOn ? "ov" : null;
-    this.themeBg.show(layers ? { ...p.theme, key: `${p.theme.key}|${layers}`, layers } : null);
+    // (or a Custom Theme's own copy of a PS3 theme's: see above)
+    const src = cps ? cps.theme : p?.theme;
+    const bgOn = cps ? cps.bg : !!on("tBackground"), ovOn = cps ? cps.ov : !!(on("tOverlay") && p.theme.scene);
+    const layers = bgOn && ovOn ? "all" : bgOn ? (src.scene ? "bg" : "all") : ovOn ? "ov" : null;
+    this.themeBg.show(layers ? { ...src, key: `${src.key}|${layers}`, layers } : null);
     this._applyThemeSounds(on("tSounds"), cu?.theme, t.soundTheme ? this._themeFind("sound", t.soundTheme) : null);
     const col = on("tColor")?.color;
     this._themeColor = col == null ? null : (col >= 1 && col <= 12 ? MONTH_COLORS[col] : "auto");
+    this.wave.setThemeMonth && this.wave.setThemeMonth(col >= 1 && col <= 12 ? col - 1 : null);
     // the default folders take the theme's colour while its icons are shown
     // as they are (until your own Icon Color / Style is turned on)
     const root = document.documentElement;
@@ -4377,13 +4825,21 @@ Are you sure you want to continue?`,
     const snd = kind === "sound";
     const what = { p3t: "Theme", custom: "Theme", icon: "Icon Set", sound: "Sound Effect Set" }[kind];
     const use = { kind: "action", act: `theme_use::${kind}::${key}`, title: on ? `Stop Using This ${what}` : `Use This ${what}`, icon: SI };
-    if (kind === "custom" || snd) return [use];
     const setting = ([k, title, desc]) => ({ kind: "setting", ctl: `tho:${key}:${k}`, title, sub: desc, icon: SI });
-    // an Icon Set: Icon Effects (its icons with your Icon Color / Icon Style,
-    // and see-through like the others)
+    // a Custom Theme made over a PS3 theme's background / overlay: each can be
+    // turned off (the parts it was saved with)
+    if (kind === "custom") {
+      const sv = t.settings?.p3t;
+      const parts = sv && t.p3t ? [
+        sv.background && ["tBackground", "PS3 Theme Background", "The background of the PS3 theme this theme was made with (its picture, or the pictures its animated scene is made of). Off: the theme's own background (picture, video or colour) is shown in its place."],
+        sv.overlay && t.p3t.scene && ["tOverlay", "PS3 Theme Overlay", "The moving effects of the PS3 theme this theme was made with, drawn over its background (smoke, snow, lights, glows, logos...). With PS3 Theme Background off, they're drawn over the theme's own background and waves."],
+      ].filter(Boolean) : [];
+      return parts.length ? [use, { kind: "drill", title: "Theme Settings", icon: SI, sub: "The parts of this theme to use, each On or Off.", childrenFn: () => parts.map(setting) }] : [use];
+    }
+    if (snd) return [use];
+    // an Icon Set: Icon Effects (its icons with your Icon Style, and see-through
+    // like the others; their colour: Theme Settings > Icons > Icon Color)
     if (kind === "icon") return [use, { kind: "drill", title: "Icon Effects", icon: SI, childrenFn: () => [
-      { kind: "setting", ctl: `tho:${key}:iconColor`, title: "Icon Color", icon: SI,
-        sub: "On: All icons in the set have the color selected on Theme Settings > Icon Color applied." },
       { kind: "setting", ctl: `tho:${key}:iconStyle`, title: "Icon Style", icon: SI,
         sub: "On: All icons in the set have the style selected on Theme Settings > Icon Style applied." },
       { kind: "setting", ctl: `tho:${key}:iconAlpha`, title: "Transparency", icon: SI },
@@ -4393,10 +4849,24 @@ Are you sure you want to continue?`,
       childrenFn: () => THEME_PARTS.filter(([k]) => this._themeHasPart(t, k)).map(setting) });
     items.push({ kind: "drill", title: "Custom Settings", icon: SI, sub: "Which of your own Theme Settings stay on with this theme, each On or Off.",
       // (an Icon Theme only changes icons: just the icon settings)
-      childrenFn: () => THEME_OPTS.filter(([k]) => k !== "iconAlpha" && (kind === "p3t" || k === "iconColor" || k === "iconStyle")).map(setting) });
+      childrenFn: () => THEME_OPTS.filter(([k]) => k !== "iconAlpha").map(setting) });
     if (kind === "p3t") items.push({ kind: "action", act: `theme_extract::${key}`, title: "Extract Theme", icon: SI,
       sub: "Put everything this theme has (icons, background, preview, sounds, mouse pointers, notification box, animated scene and its textures) in a folder with its name, in the Themes Extracted folder." });
     return items;
+  }
+  // A Custom Theme's own PS3 background / overlay (saved with it), as shown
+  // now: { theme, bg, ov, opts } (opts: your settings with them), or null
+  _customP3t(th) {
+    const sv = th?.settings?.p3t, pt = th?.p3t;
+    if (!sv || !pt) return null;
+    const o = this._themeOpts(th.key);
+    const bg = !!(sv.background && o.tBackground), ov = !!(sv.overlay && o.tOverlay && pt.scene);
+    if (!bg && !ov) return null;
+    // (its PS3 background turned off: your own background and overlay take its place)
+    const so = sv.opts || {};
+    const opts = { waves: so.waves !== false, sparkles: so.sparkles !== false,
+      background: !bg || so.background !== false, overlay: !bg || so.overlay !== false };
+    return { theme: pt, bg, ov, opts };
   }
   _thoParse(ctl) { const r = ctl.slice(4), i = r.lastIndexOf(":"); return { key: r.slice(0, i), opt: r.slice(i + 1) }; }
   _thoGet(ctl) { const { key, opt } = this._thoParse(ctl); return this._themeOpts(key)[opt] !== false; }
@@ -4410,7 +4880,7 @@ Are you sure you want to continue?`,
     o[opt] = !this._themeOpts(key)[opt];
     this._persistUser();
     // only what a theme in use shows changes (the menus are drawn again when its icons change)
-    if ([t.p3tTheme, t.iconTheme].includes(key)) {
+    if ([t.p3tTheme, t.iconTheme, t.customTheme].includes(key)) {
       const icons = ["iconColor", "iconStyle", "iconAlpha", "tIcons", "tColor"].includes(opt);
       if (icons) await this._runLocked("theme", "Please wait...", () => this._applyThemes(true).catch((e) => console.warn("theme", e)));
       else await this._applyThemes(false);
@@ -4478,10 +4948,28 @@ Are you sure you want to continue?`,
         }
         // the sounds in use (a PS3 theme's with its Sounds part on, a Custom Theme's, a Sound Effects pack's)
         const t = this.user.theme, p3 = this._themeFind("p3t", t.p3tTheme);
+        // the PS3 theme's background and / or overlay shown now (a PS3 theme's in
+        // use, or a Custom Theme's own copy of one) come along: the whole unpacked
+        // theme goes in the theme's p3t folder, with which parts were on and your
+        // settings as they were with it
+        let p3tDir = null;
+        {
+          const cu = this._themeFind("custom", t.customTheme), cps = this._customP3t(cu);
+          if (cps) {
+            p3tDir = cps.theme.dir;
+            snap.p3t = { background: cps.bg, overlay: cps.ov, opts: { ...cps.opts } };
+          } else if (p3) {
+            const o = this._themeOpts(p3.key), bg = !!(o.tBackground && this._themeHasPart(p3, "tBackground")), ov = !!(o.tOverlay && p3.scene);
+            if (bg || ov) {
+              p3tDir = p3.dir;
+              snap.p3t = { background: bg, overlay: ov, opts: { waves: o.waves !== false, sparkles: o.sparkles !== false, background: o.background !== false, overlay: o.overlay !== false } };
+            }
+          }
+        }
         const sounds = this._soundFiles(p3 && this._themeOpts(p3.key).tSounds ? p3 : null, this._themeFind("custom", t.customTheme), t.soundTheme ? this._themeFind("sound", t.soundTheme) : null);
         for (const [n, p] of Object.entries(sounds)) { const ext = (/\.([a-z0-9]+)$/i.exec(p) || [, "wav"])[1].toLowerCase(); files[`sounds/${n}.${ext}`] = p; }
         await this._runLocked("theme_custom_create", "Creating the theme...", async () => {
-          try { await call("custom_theme_create", { name, settings: snap, files }); this._shotFeedback(`Theme "${name}" created`); }
+          try { await call("custom_theme_create", { name, settings: snap, files, p3t: p3tDir }); this._shotFeedback(`Theme "${name}" created`); }
           catch (e) { this.audio.play("error", 0.4); this._shotFeedback("The theme couldn't be created"); }
           await this._loadThemes();
           const lvl = this._level();
@@ -4498,16 +4986,71 @@ Are you sure you want to continue?`,
       catch (e) { this.audio.play("error", 0.4); this._shotFeedback("The theme couldn't be extracted"); }
     });
   }
-  // Icon Style (Theme Settings): "default" (the matte XMB material), "glossy"
-  // (glossy translucent glass) or "flat" (the plain icon, no shading)
+  // Icon Style (Theme Settings, ICON_STYLES): the user's own choice; before anyone signs in (or for a
+  // user who never chose), the one in use in the last session on this
+  // computer, so the system starts with it, as with the Wave Style
   _iconStyle() {
-    const v = this.user?.theme?.iconStyle;
-    return v === "glossy" || v === "flat" ? v : "default";
+    const v = this.user?.theme?.iconStyle || this.settings?.graphics?.iconStyle;
+    return ICON_STYLES.some(([k]) => k === v) ? v : "glasslive";
+  }
+  // (the Icon Style in use now is the one the system starts with next time)
+  _rememberIconStyle() {
+    if (!this.user || !this.settings) return;
+    const g = (this.settings.graphics ||= {}), v = this._iconStyle();
+    if (g.iconStyle !== v) { g.iconStyle = v; this._persistSettings(); }
+  }
+  // Glow (Pulsating): every icon's glow pulses in step with the selected
+  // title's (the same 3.4 s glow, started together); checked after the frame
+  // in which the selection (or the icons) changed
+  _syncGlowPulse() {
+    if (this._iconStyle() !== "glasspulse" || this._pulseRaf) return;
+    this._pulseRaf = requestAnimationFrame(() => requestAnimationFrame(() => {
+      this._pulseRaf = 0;
+      try {
+        const all = document.getAnimations();
+        const ttl = all.find((a) => a.animationName === "xmbLabelGlow" && a.effect && a.effect.target && a.effect.target.closest && a.effect.target.closest("#xmb .item.sel"));
+        const icons = all.filter((a) => a.animationName === "iconGlowPulse" || a.animationName === "colorGlowPulse");
+        const st = ttl && ttl.startTime != null ? ttl.startTime : icons.length && icons[0].startTime;
+        if (st == null) return;
+        for (const a of icons) if (a.startTime !== st) a.startTime = st;
+      } catch (e) {}
+    }));
+  }
+  // the icon images a style is drawn with (Reactive Glow: the reactive glass's own)
+  _shadeStyle() { const s = this._iconStyle(); return s === "glassglow" || s === "glasspulse" ? "glass" : s === "glassclear" ? "glasslive" : s; }
+  _iconStyleAttrs() {
+    const st = this._iconStyle();
+    document.documentElement.setAttribute("data-icons", st === "flat" ? "flat" : "xmbw");
+    document.documentElement.setAttribute("data-istyle", st);
+    document.documentElement.toggleAttribute("data-glow", st === "glassglow" || st === "glasspulse");
   }
   async _applyIconStyle() {
-    document.documentElement.setAttribute("data-icons", this._iconStyle() === "flat" ? "flat" : "xmbw");
-    document.documentElement.setAttribute("data-istyle", this._iconStyle());
+    const st = this._iconStyle(), sh = this._shadeStyle();
+    this._iconStyleAttrs();
+    // (Liquid Glass (Reactive): the icons bend the real background behind them)
+    document.documentElement.removeAttribute("data-glass");   // (no longer needed: the glass layer draws inside each icon)
+    // (the reactive glass: drawn by the glass layer while this style is in use)
+    // (Glass: the same, clear; Default: filled in with the glass's own pale colour)
+    if (sh === "glasslive") { glassLayer().setFilled(st !== "glassclear"); glassLayer().start(); } else if (this._glassOn) glassLayer().stop();
+    this._glassOn = sh === "glasslive";
+    // (Glow styles: each icon glows in its own border's colour; the background's
+    // light only until that's known)
+    clearInterval(this._glowT); this._glowT = 0;
+    const glow = st === "glassglow" || st === "glasspulse";
+    document.documentElement.toggleAttribute("data-glow", glow);
+    if (glow && this.wave.updateGlow) this.wave.updateGlow();
     await this._xsLoadSaved();
+    // another style chosen: the icon images (and the reactive glass's filters)
+    // made for the previous one are deleted, from memory and from the saved cache
+    if (this._lastShadeStyle !== sh) {
+      const first = this._lastShadeStyle == null;
+      this._lastShadeStyle = sh;
+      // (work still queued or running for the previous style is stopped)
+      this._xsPreRun = (this._xsPreRun || 0) + 1; clearTimeout(this._xsPreT);
+      if (this._xsQueue) this._xsQueue.clear();
+      const n = dropOtherStyles(this._keepStyles = sh === "glasslive" ? ["glasslive", "glass"] : st === "glassglow" || st === "glasspulse" ? ["glass", "glow"] : [sh]);
+      if (!first || n) call("icon_shades_save", { data: JSON.stringify(exportShades(this._xsColors || [])) }).catch(() => {});
+    }
     this._applyXmbwShading();
   }
   _adjustVolume(dir) {
@@ -4555,10 +5098,10 @@ Are you sure you want to continue?`,
     document.body.classList.toggle("nomenublur", !!b.noMenuBlur);
   }
   _cycleIconStyle(dir) {
-    const order = ["default", "glossy", "flat"];
+    const order = ICON_STYLES.map(([k]) => k);
     const i = (order.indexOf(this._iconStyle()) + dir + order.length) % order.length;
     this.user.theme.iconStyle = order[i];
-    this._persistUser(); this.audio.play("cursor_up", 0.4);
+    this._persistUser(); this._rememberIconStyle(); this.audio.play("cursor_up", 0.4);
     this._applyIconStyle();
     this._render(); this._onSelect();    // redraw the icons in the new style
   }
@@ -5019,7 +5562,7 @@ Are you sure you want to continue?`,
     // Low Performance Mode is off by default now: turned off once for settings
     // saved while it was on by default
     const lpOnce = () => { const bb = (s.behavior ||= {}); if (!bb.lowPowerOffOnce) { bb.lowPowerMode = false; bb.lowPowerOffOnce = true; return true; } return false; };
-    if (!c) { if (lpOnce()) call("save_settings", { settings: s }).catch(() => {}); this._snapshotUserSettings(); { const lvl = this._inGame ? 2 : (document.hasFocus() ? 0 : 1); this._lowPower = -1; this.setLowPower(lvl); } return; }       // first sign-in: keeps the current settings
+    if (!c) { if (lpOnce()) call("save_settings", { settings: s }).catch(() => {}); this._snapshotUserSettings(); { const lvl = this._inGame ? 2 : (document.hasFocus() ? 0 : 1); this._lowPower = -1; this.setLowPower(lvl); } this._applyPerformance(); return; }       // first sign-in: keeps the current settings
     const before = { fs: s.behavior?.fullscreen, auto: s.behavior?.autostart, res: s.behavior?.resolution };
     for (const k of USER_SETTING_KEYS) if (c[k] !== undefined) s[k] = JSON.parse(JSON.stringify(c[k]));
     if (lpOnce()) this._snapshotUserSettings();
@@ -5456,19 +5999,24 @@ Are you sure you want to continue?`,
 
   // On-screen keyboard over the app: the browser window steps aside while it's
   // up (it's a separate, always-on-top window), then comes back.
-  _browserOsk(opts, onDone) {
+  // (the page behind it as a picture, as when typing in a page: see _browserSnap)
+  async _browserOsk(opts, onDone) {
     const b = this._br;
     if (!b || this._brOskOpen) return;
     if (b.down) { b.down = false; this._browserInput({ button: "up" }); }
     this._brOskOpen = true;
+    const snap = await this._browserSnap(true);
+    if (!this._browserActive || !this._brOskOpen) { snap.classList.remove("show", "under"); return; }
     call("browser_visible", { visible: false }).catch(() => {});
     this.overlay = this.textForm;
     const finish = (text) => {
       this.textForm.close();
       this._brOskOpen = false;
       b.oskClosedAt = Date.now();
-      if (!this._browserActive) return;
-      call("browser_visible", { visible: true }).catch(() => {});
+      const hide = () => snap.classList.remove("show", "under");
+      if (!this._browserActive) { hide(); return; }
+      // (the picture goes once the window is back over it)
+      call("browser_visible", { visible: true }).catch(() => {}).finally(() => setTimeout(hide, 250));
       this.overlay = this._browserCtl();
       if (text != null) onDone(text);
     };
@@ -5477,8 +6025,9 @@ Are you sure you want to continue?`,
     this.textForm.open({ title: opts.title, fields: [field], submit: opts.submit },
       (out) => finish(String(out.v ?? "")), () => finish(null));
   }
+  // (the current page's full address already in it: edited, or cleared and typed anew)
   _browserAddress(edit) {
-    const url = edit ? (this._br && this._br.url) || "" : "";
+    const url = (this._br && this._br.url) || "";
     this._browserOsk({ title: edit ? "Edit Address" : "Enter Address", label: "Address", value: url, submit: "Go" },
       (t) => { if (t.trim()) this._browserCmd("navigate", t.trim()); });
   }
@@ -5492,6 +6041,21 @@ Are you sure you want to continue?`,
     this._browserOskDirect({ title: "Enter Text", value: st.focusValue || "", password: !!st.focusPassword },
       (t) => call("browser_type", { text: t, replace: !!st.focusReplace, enter: true }).catch(() => {}));
   }
+  // the page as a picture (taken now), shown in the browser window's place;
+  // under: behind the Enter Address / Search box (in front of everything else
+  // otherwise, behind the on-screen keyboard)
+  async _browserSnap(under) {
+    let snap = document.getElementById("browser-snap");
+    if (!snap) { snap = document.createElement("img"); snap.id = "browser-snap"; snap.alt = ""; document.body.appendChild(snap); }
+    snap.classList.toggle("under", !!under);
+    try {
+      const p = await call("browser_snapshot");
+      bumpAsset(p); snap.src = assetUrl(p);
+      await snap.decode().catch(() => {});
+      snap.classList.add("show");
+    } catch (e) {}
+    return snap;
+  }
   // The browser is a separate window over the app, so the page is kept as a
   // picture (taken the moment before) behind the keyboard while the window
   // steps aside; the window comes back over it when the keyboard closes.
@@ -5500,14 +6064,7 @@ Are you sure you want to continue?`,
     if (!b || this._brOskOpen) return;
     if (b.down) { b.down = false; this._browserInput({ button: "up" }); }
     this._brOskOpen = true;
-    let snap = document.getElementById("browser-snap");
-    if (!snap) { snap = document.createElement("img"); snap.id = "browser-snap"; snap.alt = ""; document.body.appendChild(snap); }
-    try {
-      const p = await call("browser_snapshot");
-      bumpAsset(p); snap.src = assetUrl(p);
-      await snap.decode().catch(() => {});
-      snap.classList.add("show");
-    } catch (e) {}
+    const snap = await this._browserSnap(false);
     if (!this._browserActive || !this._brOskOpen) { snap.classList.remove("show"); return; }
     call("browser_visible", { visible: false }).catch(() => {});
     const osk = this._brOsk || (this._brOsk = new OnScreenKeyboard(this.audio));
@@ -5559,13 +6116,15 @@ Are you sure you want to continue?`,
     const url = local(st.url) ? "" : (st.url || "");
     const title = local(st.url) ? "" : (st.title || "");
     b.url = url;
+    // (compared with the text set last: a rotating title holds a copy of its
+    // text, so setting it again every update kept it from ever moving)
     const set = (sel, txt) => {
       const n = el.querySelector(sel);
-      if (n && n.textContent !== txt) n.textContent = txt;
+      if (n && n._txt !== txt) { n._txt = txt; n.textContent = txt; scanMarquees(el); }
     };
     set(".br-name", title);
     set(".br-url", url);
-    set(".br-status", st.hover || "");
+    set(".br-status", st.hover || "");   // (scrolls too when it's wider than the screen)
   }
   _hideBrowserChrome() {
     const el = document.getElementById("browser");
@@ -5612,7 +6171,14 @@ Are you sure you want to continue?`,
     const code = Keybinds.codesFor("screenshot").map(codeToVk).find((v) => v) || 0;
     // (the next-tab key is handled inside the page by the helper)
     const tabKey = Keybinds.codesFor("brnexttab").find((c) => !/^Mouse/.test(c)) || "";
-    call("browser_set_hotkeys", { screenshotVk: code, tabKey, tabVk: codeToVk(tabKey) }).catch(() => {});
+    // keys bound to controller buttons act as the controller while the browser
+    // has focus: [Windows key code, KeyboardEvent code, action]
+    const PAD = ["up", "down", "left", "right", "ls_up", "ls_down", "ls_left", "ls_right", "enter", "back", "options", "square",
+      "select", "start", "l1", "r1", "l2", "r2", "l3", "r3"];
+    const padKeys = [];
+    for (const a of PAD) for (const c of Keybinds.codesFor(a)) if (!/^Mouse/.test(c) && codeToVk(c)) padKeys.push([codeToVk(c), c, a]);
+    const fsKey = Keybinds.codesFor("brfullscreen").find((c) => !/^Mouse/.test(c)) || "";
+    call("browser_set_hotkeys", { screenshotVk: code, tabKey, tabVk: codeToVk(tabKey), padKeys, fsVk: codeToVk(fsKey) }).catch(() => {});
     const quit = Keybinds.codesFor("quit").map(codeToVk).find((v) => v) || 0;
     call("set_quit_key", { vk: quit }).catch(() => {});
   }
@@ -6341,8 +6907,9 @@ Are you sure you want to continue?`,
   _gridMove(d) {
     const lvl = this._level(), w = this.root.clientWidth, h = this.root.clientHeight;
     let n = lvl.sel + d;
-    if (Math.abs(d) === GRID_COLS) {
-      if (n < 0) return;
+    if (Math.abs(d) >= GRID_COLS && d % GRID_COLS === 0) {
+      // (several rows at once while held: up to the first / last row)
+      if (n < 0) { if (Math.abs(d) === GRID_COLS || lvl.sel < GRID_COLS) return; n = lvl.sel % GRID_COLS; }
       if (n >= lvl.items.length) { if (Math.floor(lvl.sel / GRID_COLS) === Math.floor((lvl.items.length - 1) / GRID_COLS)) return; n = lvl.items.length - 1; }
     } else if (n < 0 || n >= lvl.items.length) return;
     lvl.sel = n;
@@ -6392,6 +6959,7 @@ Are you sure you want to continue?`,
       }
     }
     if (level > 0) this._freezeGifs(); else this._thawGifs();
+    if (!level && window.__syncGlows) window.__syncGlows();   // (the glows carry on together)
   }
   _bgVideos() { return [...document.querySelectorAll("#wallpaper video, #overlay video")]; }
   _coverBgVideos(on) {
@@ -6473,18 +7041,87 @@ Are you sure you want to continue?`,
     if (this._placing) { this._placeInput(a); return; }     // moving a section
     if (this._busy) return;                                   // converting a video
     if (this._actBusy) return;                                // something chosen is still working (see _trackBusy)
+    if (a !== "up" && a !== "down") this._glideEnd(true);
     const w = this.root.clientWidth, h = this.root.clientHeight;
     const lvl = this._level();
     switch (a) {
       case "left": this._navSide(-1); break;
       case "right": this._navSide(1); break;
-      case "up": if (lvl.grid) { this._gridMove(-GRID_COLS); break; } if (lvl.sel > 0) { lvl.sel--; this.audio.play("cursor_up", 0.5); this._layoutItems(w, h); this._onSelect(); } break;
-      case "down": if (lvl.grid) { this._gridMove(GRID_COLS); break; } if (lvl.sel < lvl.items.length - 1) { lvl.sel++; this.audio.play("cursor_down", 0.5); this._layoutItems(w, h); this._onSelect(); } break;
+      // (held: long lists speed up step by step, like a number setting does:
+      // a step of up to a tenth of the list, so short menus move one by one)
+      case "up": case "down": {
+        const d = a === "up" ? -1 : 1, n = lvl.items.length;
+        const k = holdAccel("xmb-list:" + a, lvl.grid ? Math.floor(n / GRID_COLS / 10) : Math.floor(n / 10));
+        // (sped up: the list scrolls there row by row, see _glide)
+        if (k > 1 || (this._gl && this._gl.lvl === lvl && this._gl.d === d)) { this._glideBy(lvl, d, k); break; }
+        if (lvl.grid) { this._gridMove(d * GRID_COLS * k); break; }
+        const to = Math.max(0, Math.min(n - 1, lvl.sel + d * k));
+        if (to !== lvl.sel) { lvl.sel = to; this.audio.play(d < 0 ? "cursor_up" : "cursor_down", 0.5); this._layoutItems(w, h); this._onSelect(); }
+        break;
+      }
       case "enter": this._trackBusy(this._activate()); break;
       case "options": this._trackBusy(this._options()); break;
       case "square": this._trackBusy(this._cycleMediaMode()); break;
       case "back": this._back(); break;
     }
+  }
+
+  // Held Up / Down in a long list, sped up: instead of jumping several rows
+  // at once (which looked like a few still pictures), the selection moves
+  // row by row, a few rows a frame, spread over the time until the next
+  // repeat, with the rows sliding linearly (.item-col.glide), so the list is
+  // seen scrolling. The selected item's details (backdrop, preview, info)
+  // follow once it stops.
+  _glideBy(lvl, d, k) {
+    let g = this._gl;
+    if (!g || g.lvl !== lvl || g.d !== d) {
+      if (g) this._glideEnd(true);
+      // (still held: the details wait for the end)
+      clearTimeout(this._glideSelT); this._glPend = null;
+      g = this._gl = { lvl, d, left: 0 }; this.$items.classList.add("glide");
+    }
+    // (never far behind the button: what's left over a few repeats at most)
+    g.left = Math.min(g.left + k, k * 3);
+    // (spread over about one repeat's time, 130 ms, whatever the frame rate)
+    g.last = performance.now(); g.until = g.last + 130;
+    this.audio.play(d < 0 ? "cursor_up" : "cursor_down", 0.5);
+    if (!g.raf) g.raf = requestAnimationFrame(() => this._glideStep());
+  }
+  _glideStep() {
+    const g = this._gl; if (!g) return;
+    g.raf = 0;
+    const lvl = g.lvl;
+    if (lvl !== this._level() || this.overlay) { this._glideEnd(); return; }
+    const now = performance.now(), share = Math.min(1, (now - g.last) / Math.max(1, g.until - g.last));
+    const steps = Math.min(g.left, Math.max(1, Math.round(g.left * share)));
+    g.left -= steps; g.last = now;
+    const n = lvl.items.length;
+    let to;
+    if (lvl.grid) {
+      const rows = Math.ceil(n / GRID_COLS), row = Math.floor(lvl.sel / GRID_COLS), r2 = Math.max(0, Math.min(rows - 1, row + g.d * steps));
+      to = Math.min(n - 1, r2 * GRID_COLS + lvl.sel % GRID_COLS);
+    } else to = Math.max(0, Math.min(n - 1, lvl.sel + g.d * steps));
+    const moved = to !== lvl.sel;
+    // (more than a couple of rows this frame: they're put in place, not slid,
+    // or every row would be in mid-flight and the list would look empty)
+    this.$items.classList.toggle("glide-fast", steps > 2);
+    if (moved) { lvl.sel = to; this._layoutItems(this.root.clientWidth, this.root.clientHeight); if (window.__syncGlows) window.__syncGlows(); }
+    if (moved && g.left > 0) g.raf = requestAnimationFrame(() => this._glideStep());
+    else this._glideEnd();
+  }
+  // now: something else was pressed (the details are needed right away);
+  // otherwise they come a moment later, unless the button is still held
+  _glideEnd(now = false) {
+    const g = this._gl || this._glPend; if (!g) return;
+    this._gl = null; this._glPend = null;
+    if (g.raf) cancelAnimationFrame(g.raf);
+    clearTimeout(this._glideT); clearTimeout(this._glideSelT);
+    // (the rows finish their last slide before the usual easing is back)
+    this._glideT = setTimeout(() => { if (!this._gl) this.$items.classList.remove("glide", "glide-fast"); }, 160);
+    if (this._lazyEls && this._lazyEls.size) { this.$items.classList.remove("glide-fast"); this._lazyArtSoon(); }
+    const sel = () => { if (!this._gl && g.lvl === this._level()) this._onSelect(); };
+    if (now) sel();
+    else { this._glPend = g; this._glideSelT = setTimeout(() => { if (this._glPend === g) { this._glPend = null; sel(); } }, 180); }
   }
 
   // Square, at the top level of Music / Photo / Video, cycles the sort mode
@@ -6616,10 +7253,15 @@ function setPlayerIconTint(c) {
     document.body.appendChild(svg);
     f = document.getElementById("icon-tint-matrix");
   }
+  // (none: each picture as it is: the system's white ones, and an Icon Set's
+  // own, coloured ones)
+  if (!c) { f.setAttribute("values", "1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0"); return; }
   const r = c.r / 255, g = c.g / 255, b = c.b / 255, a = c.a ?? 1;
   const row = (k) => `${(k * 0.2126).toFixed(4)} ${(k * 0.7152).toFixed(4)} ${(k * 0.0722).toFixed(4)} 0 0`;
   f.setAttribute("values", `${row(r)} ${row(g)} ${row(b)} 0 0 0 ${a} 0`);
 }
+// Icon Color Off: the media players' icons keep their own colours too (see applyIconColorVar)
+let PLAYER_OWN = false;
 // Icon Color "Original": the colour the background gives the icons right now
 // (set by the wave, see WaveBackground._updateIconAuto)
 let ICON_AUTO_RGB = [1, 1, 1];
@@ -6632,9 +7274,15 @@ function applyIconColorVar(hex) {
   const original = !hex || hex === "auto";
   if (original) hex = "#" + ICON_AUTO_RGB.map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
   const c = parseColor(hex);
-  // "Original": the icons inside the media players stay their default white
-  setPlayerIconTint(!original && c ? c : { r: 255, g: 255, b: 255, a: 1 });
+  // "Original", or Icon Color Off: the icons inside the media players are shown
+  // as they are (the system's white; an Icon Set's in its own colours: turning
+  // them into grey, as the white tint did, made a set's look like the system's)
+  setPlayerIconTint(!original && c && !PLAYER_OWN ? c : null);
   const root = document.documentElement.style;
+  // (the opacity filter only while the colour has one: a filter on every icon,
+  // even a no-op one, makes the browser redraw it whenever its glass changes)
+  const see = !!c && c.a < 1;
+  document.documentElement.classList.toggle("icon-alpha", see);
   if (!c) { root.setProperty("--icon-color", hex || "#ffffff"); root.setProperty("--icon-alpha", "1"); return; }
   root.setProperty("--icon-color", colorHex({ ...c, a: 1 }));
   root.setProperty("--icon-alpha", String(c.a));
@@ -6923,6 +7571,13 @@ function resetLabel(it) {
 // rotating loading icon (as in preloads) instead of an empty frame
 // (flat: the section's own icon, drawn flat in the Icon Color in the middle of
 // the loading icon: the XMB's own lists only)
+// a row taken out of the page: its pictures and videos stop loading (a
+// removed picture would otherwise go on loading, and scrolling quickly
+// through a big library piled them up until nothing new could show)
+function dropMedia(el) {
+  for (const img of el.querySelectorAll("img")) { const u = img.getAttribute("src"); if (u && !/^(\.\/)?assets\//.test(u) && !(img.complete && img.naturalWidth)) img.removeAttribute("src"); }
+  for (const v of el.querySelectorAll("video")) { if (v.getAttribute("src")) { v.removeAttribute("src"); try { v.load(); } catch (e) {} } }
+}
 function watchArtLoading(root, flat = null) {
   root.querySelectorAll("img.art-img, img.ff-thumb, img.item-avatar").forEach((img) => {
     if (img.complete && img.naturalWidth) return;

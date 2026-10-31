@@ -103,6 +103,8 @@ try { if (!IN_TAURI && typeof window !== "undefined" && window.__xmbMockSeed) Ob
 // (the browser preview starts with an empty library)
 const MOCK_GAMES = [];
 const MOCK_MEDIA = { music: [], photo: [], video: [] };
+// (browser preview only: a test can start the mock with media in its library)
+try { if (!IN_TAURI && typeof window !== "undefined" && window.__xmbMockMedia) Object.assign(MOCK_MEDIA, window.__xmbMockMedia); } catch (e) {}
 
 let idc = 1;
 const nid = (p) => `${p}${Date.now()}_${idc++}`;
@@ -113,8 +115,11 @@ const PICKERS = new Set(["pick_folder", "pick_font", "pick_file"]);
 export async function call(cmd, args = {}) {
   if (IN_TAURI && PICKERS.has(cmd)) {
     Input.picking = (Input.picking || 0) + 1;
+    // (the pointer is never hidden over the app while the window is open)
+    document.body.classList.add("picking");
     try { return await invoke(cmd, args); }
     finally {
+      document.body.classList.remove("picking");
       try { window.focus(); } catch (e) {}   // the page takes the keys / controller again
       setTimeout(() => { Input.picking = Math.max(0, (Input.picking || 1) - 1); }, 250);
     }
@@ -135,7 +140,7 @@ export async function call(cmd, args = {}) {
     case "browser_cmd": case "browser_type": if (mock.browser) mock.browser.cmds.push({ cmd, ...args }); return null;
     case "browser_input": case "browser_visible": return null;
     case "content_writable": return { ok: true, dir: "(preview)" };
-    case "app_info": return { name: "MaXMB", version: "1.0.0", contentRoot: "(preview)" };
+    case "app_info": return { name: "MaXMB", version: "1.1.0", contentRoot: "(preview)" };
     case "scan_library": return structuredClone(MOCK_GAMES);
     case "game_sources_sync": return 0;
     case "media_recognize": case "media_source_remove": return 0;
@@ -147,8 +152,12 @@ export async function call(cmd, args = {}) {
     case "game_meta_save": { const g = MOCK_GAMES.find((x) => x.folder === args.folder);
       if (g) { if (args.patch.isDisc) MOCK_GAMES.forEach((x) => { x.isDisc = false; }); Object.assign(g, args.patch); } return null; }
     case "game_delete": { const i = MOCK_GAMES.findIndex((x) => x.folder === args.folder); if (i >= 0) MOCK_GAMES.splice(i, 1); return null; }
-    case "icon_shades_load": return "{}";
-    case "icon_shades_save": return null;
+    // (the preview keeps the icon shading file in memory, like the app's cache file)
+    case "icon_shades_load": return mock.iconShades || "{}";
+    case "icon_shades_save": mock.iconShades = args.data; return null;
+    case "wave_cache_load": return mock.waveCache || "{}";
+    case "wave_cache_save": mock.waveCache = args.data; return null;
+    case "clear_cache": if (args.category === "icons" || args.category === "all") mock.iconShades = "{}"; return null;
     case "game_sources_detected": return [];
     case "game_sources_delete": return null;
     case "game_sources_remove": return 0;

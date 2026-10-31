@@ -57,9 +57,9 @@ export class ThemeBackground {
     const canvas = document.createElement("canvas");
     canvas.className = "p3t-canvas";
     el.appendChild(canvas);
-    let alive = true, raf = 0, ro = null, renderer = null, onWinResize = null;
+    let alive = true, raf = 0, ro = null, renderer = null, onWinResize = null, sleepT = 0;
     this._stop = () => {
-      alive = false; cancelAnimationFrame(raf); ro && ro.disconnect();
+      alive = false; cancelAnimationFrame(raf); clearTimeout(sleepT); ro && ro.disconnect();
       if (onWinResize) window.removeEventListener("resize", onWinResize);
       try { renderer && renderer.dispose(); } catch (e) {}
     };
@@ -122,10 +122,19 @@ export class ThemeBackground {
         const draw = (actors) => { cleared = false; renderer.draw(1, actors); };
         const frame = (now) => {
           if (!alive) return;
+          // (a game running, or out of sight: looked at again a little later,
+          // not on every frame)
+          const bl = document.body.classList;
+          if (bl.contains("in-game") || bl.contains("bgcovered") || bl.contains("mpfull") || bl.contains("pv-open") || bl.contains("video-open") || bl.contains("mpvis")) {
+            at = 0; clearTimeout(sleepT); sleepT = setTimeout(() => { if (alive) raf = requestAnimationFrame(frame); }, 300); return;
+          }
           raf = requestAnimationFrame(frame);
           // held still (time doesn't move on) while a game runs, the window is
           // hidden or Low Performance Mode is on and the window is out of focus
           const b = document.body.classList;
+          // (or out of sight: under an item's own background, the Photo Viewer,
+          // the Video Player or a Music Player visualizer: not drawn at all)
+          if (b.contains("bgcovered") || b.contains("mpvis") || b.contains("mpfull") || b.contains("pv-open") || b.contains("video-open")) { at = 0; return; }
           const paused = document.hidden || b.contains("in-game") || b.contains("lowpower") || !canvas.offsetParent;
           if (paused) { at = 0; if (cleared && shown) draw(pick(renderer.visible())); return; }
           if (now < due - 3) { if (cleared && shown) draw(pick(renderer.visible())); return; }

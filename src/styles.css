@@ -141,7 +141,9 @@ body.no-user .ib-profile { opacity: 0; visibility: hidden; transition: none; }
 /* Icon Style "Flat": the plain icon in the Icon Color, no shading at all */
 /* (pictures shown as they are (a theme's icons in their own colours without
    its Icon Style, custom section pictures) aren't filled: they'd become squares) */
-:root[data-icons="flat"] .sysicon:not(.coloricon):not(.customicon):not(.themeown) { background: var(--icon-color) !important; }
+/* (.custwrap too: a custom section picture with its Icon Effects isn't masked,
+   so filling it made a square of the Icon Color; its own rules below draw it) */
+:root[data-icons="flat"] .sysicon:not(.coloricon):not(.customicon):not(.themeown):not(.custwrap) { background: var(--icon-color) !important; }
 /* the XMB's tintable icons stay invisible until their glossy glass image is
    ready (no flash of the plain white fill) */
 :root[data-icons="xmbw"] #xmb .sysicon[data-sys]:not(.coloricon):not(.xs-ready):not(.xs-late) { background: none !important; }
@@ -245,7 +247,7 @@ body.hide-cursor, body.hide-cursor * { cursor: none !important; }
 .cat.sel .sysicon { width: 16.51vh; height: 16.51vh; opacity: 0.9; }
 /* on a bright background (yellow, gold, silver months) the console's icons
    are nearly solid, so they stand out from it */
-:root[data-bright-bg][data-istyle="default"] .cat .sysicon:not(.coloricon), :root[data-bright-bg][data-istyle="default"] .item .sysicon:not(.coloricon) { opacity: 1; }
+:root[data-bright-bg][data-istyle="glasslive"] .cat .sysicon:not(.coloricon), :root[data-bright-bg][data-istyle="glasslive"] .item .sysicon:not(.coloricon) { opacity: 1; }
 .cat-label { position: absolute; left: 50%; top: 50%; transform: translateX(-50%); margin-top: var(--cat-label-dy, 5.66vh);
   font-size: 2.04vh; line-height: 1.95vh; text-align: center; white-space: pre; opacity: 0; transition: opacity .2s ease; pointer-events: none; }
 .cat.sel .cat-label { opacity: 1; }
@@ -299,7 +301,7 @@ body.hide-cursor, body.hide-cursor * { cursor: none !important; }
 .item-col.has-flat .item .av-wait::after { height: 4.15vh; }
 .item-col.has-flat .item.sel .av-wait::after, .item-col.has-flat .item.item-anchor .av-wait::after { height: 7.75vh; }
 .item { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center;
-  transition: left 0.28s cubic-bezier(.34,1.08,.42,1), top 0.28s cubic-bezier(.34,1.08,.42,1), opacity 0.28s ease; cursor: pointer; }
+  transition: left 0.28s cubic-bezier(.34,1.08,.42,1), top 0.28s cubic-bezier(.34,1.08,.42,1), opacity 0.28s ease, translate 0.2s ease; cursor: pointer; }
 .item-sys { width: var(--item-icon, 7.7vh); height: var(--item-icon, 7.7vh); }
 /* a setting's current choice, on the right of its row (IMG_3605: small,
    lined up in one column, a little under the title's middle) */
@@ -315,7 +317,7 @@ body.gm-sub .item-setval, .item.gm-open .item-setval, .item.gm-band .item-setval
    description lines flow downward under it (music: artist line above). */
 .item-label { position: absolute; left: 50%; top: 50%; margin-left: 6.04vw;
   transform: translateY(calc(var(--title-lh, 3.6vh) * -0.5 + 0.33vh));
-  width: max-content; pointer-events: none; transition: opacity .35s ease; }
+  width: max-content; pointer-events: none; transition: opacity .35s ease, translate .2s ease; }
 .il-body { max-width: 49.5vw; }
 /* game and program titles (and PS Home's Modern icon): not chosen, on the
    same line as every other item's title (photos, documents, songs...); chosen,
@@ -389,7 +391,7 @@ body.gm-sub .item-setval, .item.gm-open .item-setval, .item.gm-band .item-setval
 }
 /* the default (stock) avatars on PSN cards sit inside the avatar window with a wide margin */
 .item.item-card .fc-avslot .fc-av.fc-stock { width: 57.8%; height: 57.8%; margin: 21.1%; object-fit: contain; }
-.item-avatar { width: 4.45vh; height: 4.45vh; object-fit: cover; opacity: 1; border-radius: 0.5vh; transition: width .24s ease, height .24s ease; }
+.item-avatar { width: 4.45vh; height: 4.45vh; object-fit: cover; opacity: 1; border-radius: 0.5vh; transition: width .24s ease, height .24s ease, scale .2s ease; }
 .item.sel .item-avatar { width: 10.4vh; height: 10.4vh; border-radius: 1.1vh; }   /* 112 px @1080 (Users capture) */
 /* drilled-in anchor: the parent item that a sub-menu opened from, sitting to
    the left with a back arrow (like the real XMB). */
@@ -584,7 +586,7 @@ body.browser-open:not(.clock-loading) #infobox *, body.browser-open #infobox .ib
 .br-url { flex: 1 1 auto; min-width: 0; overflow: hidden; opacity: 0.92; font-size: 1.76vh; }
 /* bottom bar: the hovered link's address */
 .br-status { position: absolute; left: 3.7vw; right: 3vw; top: calc(100% - 6.94vh + 0.33vh); font-size: 1.85vh;
-  line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.92;
+  line-height: 1.3; white-space: nowrap; overflow: hidden; opacity: 0.92;
   text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
 /* a one-off notice (e.g. the helper isn't active yet), centered on the page area */
 .br-note { position: absolute; left: 24vw; right: 24vw; top: 50%; transform: translateY(-50%);
@@ -790,7 +792,7 @@ body.intro-hold #xmb { opacity: 0 !important; pointer-events: none !important; }
 /* full-screen list picker (background music, playlist building): laid out
    like the Sign-In screen (see .uisheet) */
 .lp-list { width: 43.39vw; max-height: 47vh; overflow-y: auto; position: relative; flex: 0 1 auto;
-  padding: 1.4vh 1.2vw; margin: -1.4vh 0; box-sizing: content-box; }   /* (room for the glow: nothing cut off) */
+  padding: 3vh 2.6vw; margin: -3vh -1.4vw; box-sizing: content-box; }   /* (room for the whole glow: its edge never shows the list's box) */
 .lp-space { position: relative; }
 /* (rows are 48 px: ListPicker places them itself, only those near the view) */
 .lp-item { position: absolute; left: 0; right: 0; height: 48px; box-sizing: border-box;
@@ -799,8 +801,10 @@ body.intro-hold #xmb { opacity: 0 !important; pointer-events: none !important; }
 .lp-item.sel { color: #fff; border-color: rgba(255,255,255,0.92); animation: tfxFill 3.4s ease-in-out infinite; }
 .lp-item.sel .lp-label { animation: xmbLabelGlowF 3.4s ease-in-out infinite; }
 .lp-check { width: 4.98vh; height: 4vh; flex: none; margin: 0 -0.8vh 0 -1.2vh; }
-.lp-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lp-sub { font-size: 1.7vh; opacity: 0.75; white-space: nowrap; }
+/* the name takes at most 3/4 of the row, its artist / album the rest (on the
+   right): neither covers the other, and either scrolls when it's too long */
+.lp-label { flex: 0 0 auto; max-width: 75%; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lp-sub { flex: 0 1 auto; min-width: 0; margin-left: auto; font-size: 1.7vh; opacity: 0.75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- photo / video viewer: media fullscreen, controls lower-left ---------- */
 .mediaview { position: fixed; inset: 0; z-index: 80; display: none; background: #000; }
@@ -813,6 +817,9 @@ body.intro-hold #xmb { opacity: 0 !important; pointer-events: none !important; }
 
 /* ---------- music player: song info + controls, lower-left (clean wave behind) ---------- */
 .musicplayer { position: fixed; inset: 0; z-index: 75; display: none; }
+/* Visual Player: the Canyon visualizer, full screen under the player's own info */
+.mp-visual { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 74; display: block; visibility: hidden; pointer-events: none; background: #000; }
+.mp-visual.show { visibility: visible; pointer-events: auto; }
 .musicplayer.show { display: block; }
 
 /* ---------- music player v2 (icon cluster + green progress) ---------- */
@@ -1014,11 +1021,11 @@ body.intro-hold #xmb { opacity: 0 !important; pointer-events: none !important; }
 .osk-paste.can { color: #0d2f55; }
 /* the button label pictures (OSK Icons, 74×28): at the key's top-left as on the console */
 .osk-badge { position: absolute; left: calc(var(--u) * 1.2); top: calc(var(--u) * 1.2); height: calc(var(--u) * 27); width: auto; pointer-events: none; }
-/* the focused key glows all over (not just its rim), pulsing */
-/* the focused key: a bright glowing rim all round (and a light glow inside), pulsing */
-.osk-k.sel::after { background: radial-gradient(ellipse at 50% 45%, rgba(255,255,255,0.42), rgba(255,255,255,0.2) 70%, rgba(255,255,255,0.12));
+/* the focused key: a bright glowing rim all round, and the whole key glowing
+   too, much more faintly (a soft light over its face), pulsing */
+.osk-k.sel::after { background: radial-gradient(ellipse at 50% 45%, rgba(255,255,255,0.6), rgba(255,255,255,0.36) 70%, rgba(255,255,255,0.26));
   box-shadow: inset 0 0 0 calc(var(--u) * 2) rgba(255,255,255,0.95), inset 0 0 calc(var(--u) * 8) rgba(255,255,255,0.8),
-    0 0 calc(var(--u) * 8) rgba(255,255,255,0.85); animation: oskSel 1.7s ease-in-out infinite; }
+    inset 0 0 calc(var(--u) * 22) rgba(255,255,255,0.4), 0 0 calc(var(--u) * 8) rgba(255,255,255,0.85); animation: oskSel 1.7s ease-in-out infinite; }
 @keyframes oskSel { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
 /* the @#: panel (IMG_3540 / 3541): grey, over the left of the keys, the
    symbols 7 to a row (7 rows on show), the focused one on the console's
@@ -1037,9 +1044,8 @@ body.intro-hold #xmb { opacity: 0 !important; pointer-events: none !important; }
   box-sizing: border-box; border-left: calc(var(--u) * 1) solid rgba(255,255,255,0.4); border-right: calc(var(--u) * 1.5) solid rgba(255,255,255,0.85);
   background: rgba(0,0,0,0.05); }
 .osk-symthumb { position: absolute; left: 0; right: 0; background: linear-gradient(90deg, rgba(255,255,255,0.4), rgba(255,255,255,0.8)); }
-.osk-symup { position: absolute; left: 50%; top: calc(var(--u) * -30); transform: translateX(-50%); width: 0; height: 0;
-  border-left: calc(var(--u) * 13) solid transparent; border-right: calc(var(--u) * 13) solid transparent;
-  border-bottom: calc(var(--u) * 12) solid #a6a8a9; filter: drop-shadow(0 calc(var(--u) * 1) calc(var(--u) * 1) rgba(0,0,0,0.3)); }
+/* (the same ▲ as the settings and option lists use when there's more above) */
+.osk-symup { position: absolute; left: 50%; top: calc(var(--u) * -30); transform: translateX(-50%); height: calc(var(--u) * 12); width: auto; pointer-events: none; }
 .osk-pred { position: absolute; left: calc(var(--u) * 724); top: 0; width: calc(var(--u) * 208); height: calc(var(--u) * 266); pointer-events: none; }
 .osk-predbox { position: absolute; left: 0; top: 0; right: 0; height: calc(var(--u) * 231); background: #6d6f6f;
   box-shadow: inset 0 calc(var(--u) * 1) 0 rgba(255,255,255,0.12); }
@@ -1239,10 +1245,12 @@ body.intro-hold #xmb { opacity: 0 !important; pointer-events: none !important; }
 .cp-focus { background: rgba(255,255,255,0.1); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35); }
 .colorpick .confirm-foot { position: fixed; }
 /* custom icon colours can carry an opacity */
-.sysicon:not(.coloricon) { filter: opacity(var(--icon-alpha, 1)); }
+:root.icon-alpha .sysicon:not(.coloricon) { filter: opacity(var(--icon-alpha, 1)); }
 
 /* before a user logs in the pointer is gone (and parked in the middle) */
 body.cursor-locked, body.cursor-locked * { cursor: none !important; }
+/* a file / folder window open: the pointer always shows */
+body.picking.hide-cursor, body.picking.hide-cursor *, body.picking.cursor-locked, body.picking.cursor-locked * { cursor: default !important; }
 
 /* ---------- Change Keybinds (laid out like the Sign-In screen, see .uisheet) ---------- */
 .kb-inner { position: fixed; left: 50%; transform: translateX(-50%); top: 19.6vh; width: 62vw; display: flex; flex-direction: column; gap: 0.6vh; }
@@ -1680,7 +1688,9 @@ body.nomenublur .tri-blur { display: none !important; }
 body.gm-sub #xmb { transform: translateX(-16.86vw); }
 /* (the game's background stays where it is: only the menu moves) */
 body.gm-sub #xmb .bg-layer { transform: translateX(16.86vw); }
-body.gm-sub #infobox { opacity: 0; transition: opacity .2s ease; }
+/* (IMG_3734, IMG_3736, IMG_3737: the info box isn't shown while a △ panel is
+   open: games, Users and Account Management) */
+body:is(.gm-sub, :has(.gamemenu.show)) #infobox { opacity: 0; transition: opacity .2s ease; }
 body.gm-sub .item.gm-band::before { display: none; }
 /* Delete (game options), IMG_3553: the Photo Viewer's confirmation layout
    over the blurred system background (no dark tint) */
@@ -1716,8 +1726,18 @@ body.nomenublur .gamedlg .vp-dlg { background: rgba(6,8,14,0.55); }
    screen to the right, the name's size unchanged) */
 .item.item-game .art-frame { transition: width 0.24s ease, scale 0.2s ease; }
 .item.item-game .item-label, .item.item-game .game-fmt { transition: translate 0.2s ease, opacity .35s ease, margin-left .24s ease; }
-.item.item-game.gm-band .art-frame { scale: 1.36; }
-.item.item-game.gm-band .item-label, .item.item-game.gm-band .game-fmt { translate: 3.42vw 0; }
+.item.item-game:is(.gm-band, .gm-open) .art-frame { scale: 1.36; }
+.item.item-game:is(.gm-band, .gm-open) .item-label, .item.item-game:is(.gm-band, .gm-open) .game-fmt { translate: 3.42vw 0; }
+/* (IMG_3733 -> IMG_3734, IMG_3735 -> IMG_3736: a user's / Account
+   Management's △ panel: its icon grows 1.26 x about its middle, its name moves
+   1.55 % of the screen to the right; the rows above move up 1.3 % and the rows
+   below down 3.8 % of the screen's height, their names hidden) */
+.item .item-sys { transition: scale .2s ease; }
+.item.tri-zoom :is(.item-avatar, .item-sys) { scale: 1.26; }
+.item.tri-zoom .item-label { translate: 1.55vw 0; }
+.item.tri-up { translate: 0 -1.3vh; }
+.item.tri-down { translate: 0 3.8vh; }
+.item:is(.tri-up, .tri-down) .item-label { opacity: 0 !important; }
 /* (and, over the system's own background, not a game's picture: the other
    categories' icons go blurred and the selected one's name hides) */
 body:has(.gamemenu.show:not(.bg)):not(.nomenublur) .cat:not(.sel) { filter: blur(0.4vh); transition: filter .2s ease; }
@@ -1984,6 +2004,9 @@ body:has(.mediaview.show) .form.show { z-index: 86; }
 
 /* ---------- picture folders: the grid (captures: 5 columns 243 px apart) ---------- */
 .item-col.grid .item.grid-cell { transition: left 0.22s ease, top 0.22s ease; }
+/* held Up / Down in a long list: the rows slide at an even speed (xmb.js _glideBy) */
+.item-col.glide .item, .item-col.grid.glide .item.grid-cell { transition: left .13s linear, top .13s linear, opacity .2s ease; }
+.item-col.glide.glide-fast .item, .item-col.grid.glide.glide-fast .item.grid-cell { transition: none; }
 .item-col.grid .item.grid-cell .art-frame.photo-thumb { display: flex; align-items: center; justify-content: center;
   aspect-ratio: auto; background: none; box-shadow: none; overflow: visible; transition: width .2s ease, height .2s ease; }
 .item-col.grid .item.grid-cell .art-frame.photo-thumb .art-img { max-width: none; max-height: none; object-fit: fill;
@@ -2081,6 +2104,8 @@ body.hud-off #xmb > :not(.bg-layer) {
    window steps aside while the keyboard is up) */
 #browser-snap { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 97; display: none; pointer-events: none; }
 #browser-snap.show { display: block; }
+/* behind the Enter Address / Search box (z-index 70) */
+#browser-snap.under { z-index: 69; }
 
 /* the clock at the top right as the loading icon (the Internet Browser while
    its page loads): the info box shows over the browser screen and both hands
@@ -2101,3 +2126,44 @@ body.clock-loading #infobox .ib-hour { animation: ibClockSpin 10.8s linear infin
 .cat.sel .sysicon.custwrap, .cat.sel img.sysicon.customicon.secpic { width: auto; height: 10.4vh; max-width: 18.5vh; }
 .cat .sysicon.custwrap { display: block; }
 .cat .custwrap .cust-img { position: static; display: block; width: auto; height: 100%; max-width: inherit; object-fit: contain; }
+
+/* ---- Icon Style "Default" (the reactive Liquid Glass): the glass layer
+   (glasslayer.js) draws each icon, with the background bent through it, into
+   a small canvas inside the icon; once it's there it takes the place of the
+   icon's plain glass picture */
+#xmb .sysicon.lg-live, #xmb .sysicon.ig-glow { position: relative; }
+#xmb .sysicon.lg-on { background: none !important; }
+.sysicon > .lg-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* a custom section's picture (.custwrap) drawn by the glass layer: the glass
+   takes the place of the picture and its gloss */
+#xmb .custwrap.lg-on .cust-img, #xmb .custwrap.lg-on .cust-gloss { opacity: 0; }
+/* ---- Icon Styles "Glow" and "Glow (Pulsating)": a glow around every icon in
+   the colour of its own border as drawn (--glow-c, iconshade.js edgeColor;
+   until it's known, the background's light: --glow-rgb), stronger on the
+   selected one. Its shape (--glow-mask, iconshade.js glowMask) is the icon spread out
+   with the icon itself cut out, 1.6 x the icon's box, so it never shows
+   through the glass. Pulsating: all icons glow and dim together, in step with
+   the selected title (xmb.js syncs them) */
+:root[data-glow] #xmb .sysicon.ig-glow::before {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 160%; height: 160%; transform: translate(-50%, -50%);
+  background: rgb(var(--glow-c, var(--glow-rgb, 255,255,255)));
+  -webkit-mask: var(--glow-mask) center / 100% 100% no-repeat; mask: var(--glow-mask) center / 100% 100% no-repeat;
+  opacity: 0.45; pointer-events: none; transition: opacity .3s ease; }
+:root[data-glow] #xmb :is(.item, .cat).sel > .sysicon.ig-glow::before { opacity: 1; }
+@keyframes iconGlowPulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+:root[data-istyle="glasspulse"] #xmb .sysicon.ig-glow::before { animation: iconGlowPulse 3.4s ease-in-out infinite; }
+/* (a custom section's picture can be wider or taller than square: its glow,
+   made square around it, keeps its proportions) */
+:root[data-glow] #xmb .sysicon.custwrap.ig-glow::before { -webkit-mask-size: cover; mask-size: cover; }
+/* the full-colour pictures (Photo Gallery, PlayStation®Network / Plus / Home,
+   What's New...) are pictures, not shaded icons: their glow is drawn around
+   their own shape, in their own border's colour (xmb.js sets --glow-c) */
+@property --cg-a { syntax: "<number>"; inherits: false; initial-value: 0.45; }
+:root[data-glow] #xmb .coloricon {
+  --cg-a: 0.45;
+  filter: drop-shadow(0 0 0.45vh rgba(var(--glow-c, var(--glow-rgb, 255,255,255)), var(--cg-a)))
+          drop-shadow(0 0 1.3vh rgba(var(--glow-c, var(--glow-rgb, 255,255,255)), calc(var(--cg-a) * 0.7)));
+  transition: --cg-a .3s ease; }
+:root[data-glow] #xmb :is(.item, .cat).sel > .coloricon { --cg-a: 1; }
+@keyframes colorGlowPulse { 0%, 100% { --cg-a: 0.3; } 50% { --cg-a: 1; } }
+:root[data-istyle="glasspulse"] #xmb .coloricon { animation: colorGlowPulse 3.4s ease-in-out infinite; }

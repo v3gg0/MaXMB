@@ -1,0 +1,340 @@
+1.1.0:
+
+
+------------------------------------------------------------------------
+1. Original Wave Style (the PS3's own wave)
+------------------------------------------------------------------------
+
+New: src/js/ps3wave/ - a JavaScript/WebGL2 port of sagemono/moyou (MIT, (c) 2026 sagemono),
+drawing the XMB wave from the console's own lines.qrc (firmware 4.93).
+
+- formats.js: QRC container reader (QRCC deflate + QRCF tree), .mnu parameter files, DDS and
+  TGA textures.
+- rsx.js: RSX Cg binary (.vpo / .fpo) to GLSL ES 3.00 translator (container parsing,
+  microcode decoding, GLSL emission), output identical to moyou-cli transpile with hwprec.
+- params.js: the console's parameter schedule (month maps, time-of-day presets, fades), with
+  MaXMB additions: per-key mods (Wave and Sparkles Personalization scales the console's
+  values), screen-preset overlays (override/music_1 for the Music Player's Visualizer Wave)
+  faded by the clock, and a month override for PS3 themes.
+- sim.js: the rope / wave simulation (sim/wave.cpp), warmed from a straight rope
+  (36000 + 3000 n steps) to the console's start state.
+- particles.js: the sparkles, with round-toward-zero float arithmetic as on the console.
+- renderer.js: the full frame - background (back_colours0-2), wave sheet (lines1),
+  LinesController, the HDR glare chain (GlareSourcePre, Copy, mips, Gaussian, AccGlare),
+  ToneApplyDisplay and particles. MaXMB additions: a custom background map for Background
+  Color squares, the wave without its background (over a picture or video), wave and sparkle
+  colours, and the background rendered on its own (for icon / menu colours).
+- original.js: the Wave Style driver (same controls as linkev's wave in wave.js): Background
+  Color, Month and Time Colors, colours, waves / sparkles on or off, wallpaper, Still Waves,
+  FPS Cap, focus and in-game power saving, controller motion.
+  - Graphics safety: shaders compiled in the background with a start deadline; falls back to
+    linkev's wave on context loss, start timeout or under 10 fps (remembered per computer).
+  - Drawn at most at 1080 lines (540 minimum) and stretched to the window; follows
+    Display Settings > Resolution.
+  - Idle when nothing of it shows (waves and sparkles off over a picture / theme background,
+    or the screen covered: body classes mpfull, pv-open, video-open); woken at once by _kick.
+  - Background colour read back asynchronously (backgroundPixelsStart/Take) and cached; the
+    cache key includes the screen-preset overlay state, so colours aren't reused after the
+    Music Player's Visualizer Wave fades out.
+- warm.worker.js: the rope warm-up runs in a Web Worker while the shaders compile.
+- wavecache.js (new): Wave Cache - the warmed rope state (Float64, cur + vel, base64) saved per
+  settings key (up to 8, most recently used kept), bit-identical to a fresh run.
+- background.js: the console's month / time-of-day background on its own (64 x 36), used for
+  linkev's wave with Month and Time Colors and for icon colours; pre-built 8 s after start and
+  kept across Wave Style changes.
+- monthbg.js (new): MaXMB's own measured model of that background (PCA, 20 components) for when
+  lines.qrc isn't there, so linkev's wave still shows the console's month colours.
+- custom_render_plugin.prx is no longer needed (rope start states are computed, not read from
+  the .prx); only lines.qrc is.
+- wave.js: drives either style (Original / linkev); icon auto colour, menu tint and glow taken
+  from the live background; colours refreshed after a screen-preset fade (600 ms, 1.5 s).
+- Background Color squares refitted row by row to console captures for the Original style
+  (ORIG_SQUARES).
+- intro.js: the boot intro starts on black and the background / wave rise to the menu's colour
+  and stay there (both styles).
+- "linkev's" renamed "linkev" everywhere in the UI.
+
+
+------------------------------------------------------------------------
+2. Music Player: Visual Player (Canyon and Earth)
+------------------------------------------------------------------------
+
+New: the PS3's Music Player visualizers, reverse-engineered from soundvisualizer_plugin,
+custom_render_plugin, qgl_canyon_app, qgl_gaia_app and qglbase (firmware 4.93, Ghidra).
+
+- spectrum.js: the console's spectrum - 512 stereo samples at 48 kHz, Gaussian window, FFT
+  scaled 1/512, 17-tap Gaussian smoothing, 256 log-spaced bands, 3*ln(512m+1)/ln(513).
+  SpectrumTap reads the Music Player's <audio> through a 48 kHz Web Audio graph (two
+  analysers) and undoes the element's volume, so the visualizer reacts the same at any volume
+  (the console reads the music before its volume).
+- canyon.js: Canyon on WebGL2 from canyon.qrc - presets and settings (.mnu), normal map, RSX
+  programs via rsx.js; terrain commit physics as decompiled (valley shape, damped spring per
+  column, 5 smoothing passes, normals), 128 x 128 quad ring, colour LUT, fog, line effect;
+  depth of field (canyon_blur_ammount, 5 x canyon_layer_blur_blur, 256 x 144 x 4 blur
+  pyramid) and feedback (canyon_layer_blur.fpo). Preset groups and timings as in
+  custom_render (Bir, Voyage, Volcano, Volvic, Blue), terrain reset and 2 s morph on a new song.
+  - Blur pyramid steps set to [0.5, 1, 2, 4] texels (slice 0 averaged, not blurred), matched
+    to the console's video capture.
+- earth.js: Earth from earth.qrc - cube faces from 2 x 2 JPEG tiles per face (layout worked
+  out from the tile seams), stars and sun disk, the 30 camera flights (qglbase camera path:
+  cubic segments, time-weighted key slopes), sun direction, per-flight settings; atmosphere
+  drawn per pixel with Sean O'Neil's scattering model (GPU Gems 2) using the console's
+  wavelengths and sun intensity; tuning (EARTH_TUNE) matched to a console video capture.
+  - Faces prepared with canvas transforms (no per-pixel loops, no getImageData read-back),
+    uploaded straight from an OffscreenCanvas, one face per task; verified pixel-identical
+    to the previous method on all 18 faces.
+- Both visualizers draw at about 60 fps (12.5 ms minimum between frames) whatever the display
+  refresh rate or V-Sync setting.
+- ui.js (MusicPlayer):
+  - Square cycles Visualizer Wave -> Canyon -> Earth -> Visualizer Wave; a missing .qrc is
+    skipped with a note naming the file.
+  - Visualizers Cache: Canyon and Earth created 1.5 s after the player opens and drawn once
+    while hidden (prepare()), shared through promises (_canyonReady / _earthReady), so
+    switching is immediate. Freed on close (WebGL contexts lost, canvases removed, archives
+    dropped) unless Save Cache in System Directory is on.
+  - The <audio> element is CORS-enabled from the start and routed through the Web Audio graph
+    when the player opens, so the song is never reloaded when a visualizer starts.
+  - The Web Audio context is suspended when the player closes and resumed when it opens.
+  - Visualizer canvases use visibility (not display) so they keep their size while hidden.
+- ps3.rs / lib.rs: the PS3's own files (lines.qrc, canyon.qrc, earth.qrc) read from
+  resources/ps3 only (command ps3_file, KNOWN list); in debug builds also from
+  src-tauri/resources/ps3 and src-tauri/ps3. src-tauri/resources/ps3/README.txt added;
+  the folder's contents are git-ignored.
+
+
+------------------------------------------------------------------------
+3. Icons: styles, colour and shading
+------------------------------------------------------------------------
+
+- Icon Styles now: Original (Reactive), Original, Glow, Glow (Pulsating), Glass (Reactive),
+  Glossy, Flat (ICON_STYLES).
+- glasslayer.js (new): the reactive glass - the wave's frame copied to a texture each frame and,
+  per visible icon, a magnified, rim-refracted tile of the background cut to the icon's shape
+  in a shared off-screen canvas; fully faded icons skipped, only moving icons redrawn while the
+  wave holds still; sleeps in game. setFilled() gives the Original (Reactive) pale fill
+  (uBody 0.78).
+- iconshade.js: icon shading (glass, glossy) with glow shapes
+  per icon (outer border and inner gaps), the same for Icon Sets.
+- Icon Color On/Off (iconColorAll, default On) with Icon Color Pick (_pickHex); Off keeps every
+  icon's own colours.
+- Icon cache per style; switching style deletes the previous style's cache; Delete Icon
+  Shading also clears the shades in memory and re-shades at once.
+- Icons prepared ahead of time while idle; the last session's Icon Style applied before
+  sign-in.
+- Theme icon layering: Icon Set first, then Custom Theme, then PS3 theme; a lower layer never
+  loads an icon a higher one has (P3T_KEEP excepted); blob URLs revoked after use.
+- Vice icon set added (content/Icon/Vice), including the media players' icons.
+
+
+------------------------------------------------------------------------
+4. Games and launching
+------------------------------------------------------------------------
+
+- gamesrc.rs:
+  - Store launchers: Steam (app manifests .acf, steam://rungameid), Epic Games, GOG (game
+    info play tasks), Amazon Games and Battle.net games started through their launcher;
+    EA app / Ubisoft Connect from their own program. Games found earlier are upgraded on the
+    next scan unless edited by hand (upgrade_store).
+  - Steam folders: the Steam root, a library, steamapps or steamapps\common can be added;
+    Steam's own .url shortcuts start through Steam with Steam's icon.
+  - Source folder modes: By Folders / By Executables ("How the Games are separated"), stored
+    per folder (sync_modes); new folder rule: a folder is one game when it has a real root
+    program (or inner game folders / game files, or root programs plus an uninstaller), and
+    a folder of games with a loose installer or tool is still read one game per subfolder.
+  - PS3 games: a Windows .lnk written per game (write_lnk / write_ico / rpcs3_cmdline), the way
+    RPCS3's Create Shortcut makes them (--no-gui, by Title ID or EBOOT.BIN, with the icon).
+  - Names ending in "Game" kept; duplicates across two source folders listed once.
+  - Tests added (Steam, launchers, separate apps, edge cases, end-to-end installer case).
+- library.rs: loose shortcuts / programs in content/Games wrapped in a folder of their own
+  (wrap_loose_shortcuts).
+- launcher.rs:
+  - LaunchPlan::Raw: an .lnk pointing at RPCS3 starts RPCS3 directly with its exact argument
+    line (raw_arg), not through cmd start.
+  - Every game / program is spawned with NORMAL_PRIORITY_CLASS (it no longer inherits the
+    app's lowered priority).
+- focus.rs:
+  - Follow: the game is followed by its pid, its descendants, processes running from its
+    folder and new foreground programs; programs already running at launch are ignored;
+    180 s timeout when the game never shows.
+  - In game, the app and its WebView2 processes drop to BELOW_NORMAL, and so do the app's own
+    FFmpeg processes (preloads, conversions, stills); restored afterwards.
+- focus.rs: game mode ends when the app's own window is in front for two checks in a row
+  (after something else was, once the game has been seen), even if a launcher or part of
+  the game is still running; the launchers' helper processes (GameOverlayUI, Steam's
+  error reporter and service, Epic's web helper, GOG Galaxy's helper, EA's background
+  service) are never taken for the game; what's followed, the end, and what was still
+  running when the user came back by hand are written to the log.
+- focus.rs: a program already running before the game (by its file, e.g. SynTPEnh.exe
+  restarting when the screen mode changes) or one in C:\Windows is never taken for the
+  game; every way back from a game goes through return_from_game, which also repairs the
+  window once per game (un-minimized and shown; the webview hidden, shown and set to the
+  window's size, at once and again a second later, so the page draws anew; the window's
+  own full screen is left alone) and logs its state; game_mode_end does the same repair.
+- xmb.js: the page logs when it shows the menus again after a game.
+- lib.rs: WebView2 starts with CalculateNativeWinOcclusion off, so the page never stops
+  drawing because Windows reports its window as covered (after a full screen game the
+  report could stay stuck: an invisible window and a sleeping page). Losing the focus or
+  being minimized still quiets the app.
+- focus.rs: "back in the app (the game has ended)" when nothing of the game is left.
+- focus.rs: when the game's window opens while the app still has the focus (a game
+  started through its store's client), the game's window is given the focus (once per
+  window); the app also lets any program take the foreground when a game starts.
+- focus.rs / lib.rs: after a game the page must answer (game_mode_end) within 8 seconds;
+  if it doesn't (it stopped running during the game), it's loaded again. Both are logged.
+- focus.rs: bring_to_front takes the foreground from a thread of its own (the window's
+  thread only un-minimizes the window and focuses the page), and force_foreground no
+  longer joins the foreground program's input (AttachThreadInput): with a program that
+  didn't answer (a closing Steam game) it froze the app's window thread, leaving the
+  window black or see-through and the page deaf. The game's window is given the focus
+  the first time it's found without it, whoever had it (logged with who had it); the
+  page's reload logs whether the window's thread still answers.
+- focus.rs / lib.rs: a page that doesn't answer after a game is no longer reloaded (that
+  didn't bring it back: WebView2 itself had stopped) but made anew with its window: the
+  window is closed (the app kept running meanwhile: RunEvent::ExitRequested is held
+  back), what's left of the app's own WebView2 processes ended, and the window built
+  again as at the start (build_main_window, shared with the start). The log notes how
+  many WebView2 processes the app had when the game started and when the page stopped.
+- focus.rs: while a game runs, the log notes when the app's WebView2 processes end (with
+  the program in front at that moment), and when the page stopped, whether WebView2
+  wrote crash reports (EBWebView\Crashpad\reports in the webview folder) since the game
+  started.
+- focus.rs: when the page's processes ended during the game, the window is made anew as
+  soon as the game ends (no 8-second wait), and their exit codes are logged.
+- focus.rs / lib.rs: once the game is running, the page (the webview) is hidden until
+  the game ends, so it draws nothing while the game changes the screen's mode; the
+  window is black behind it (background_color), and the graphics card is left to the
+  game. The log tells the order and timing in which the page's processes ended, and
+  which one was the main one.
+- focus.rs: when the page's processes end during a game, the log also lists the programs
+  started since the game was (not the game's own) and the ones that ended along with them.
+- focus.rs: the game watch's decisions (back in the app, the game's window given the
+  focus, the game seen, ended or never shown) moved into GameWatch / BackWatch /
+  hand_off, apart from Windows, with tests of whole sessions (a Steam game from start to
+  end, Alt+Tab back with the game still open, a slow game loading behind the app, a game
+  that never shows, a local game starting the real one, a store link). The game's folder
+  is matched the same way on every system (tests).
+- focus.rs / lib.rs / xmb.js: a program from a custom section (launch_game with
+  program: true) no longer has the app's page hidden while it runs.
+- focus.rs / lib.rs / main.js: the page answers "game-exited" at once (page_alive), so a
+  living page is never taken for a stopped one (a program from a custom section didn't
+  answer before, and its window would have been made anew 8 seconds later).
+- lib.rs / focus.rs: the window getting the focus during a game (Alt+Tab or a click back)
+  shows its hidden page at once, which then ends game mode by itself. The page is hidden
+  only once the game has taken the front from the app (hiding it while the app was in
+  front, as a game started directly loaded, gave the window the focus, which was taken
+  for the user coming back: game mode ended before the game began), and the focus shows
+  only a page the watch hid. Test: a local game starting with the app still in front.
+- focus.rs / xmb.js: only the game's own window counts: the user is "back in the app"
+  only after the game itself was in front, and the page is hidden only once the game's
+  window is in front. A launcher's window (Steam's "launching" box) closing hands the
+  front back to the app while the game is still loading (on a slower PC for a long
+  while), which ended game mode before the game began. The page no longer ends game mode
+  on the window's focus alone (the backend shows the hidden page when the user is back,
+  which ends it). Tests: a launcher's box closing; a slow PC's Steam game from start to
+  end; the page side (headless).
+- wave.js: Still Waves and the power level are kept and given to every wave renderer made
+  later (another user's Wave Style, or the linkev wave taking over from an Original wave
+  that failed); before, the waves moved again with Still Waves On. xmb.js: a new user's
+  first sign-in applies the Power Save Settings too.
+- xmb.js: programs from custom sections end game mode as soon as the user is back in the app
+  (game_mode_end on focus), so the controller works on the first press.
+- Game panel (Triangle): consistent icon growth / name shift whether a preview, background or
+  hidden title is involved; game music plays even with Background Music off.
+
+
+------------------------------------------------------------------------
+5. Custom Sections and media folders
+------------------------------------------------------------------------
+
+- sections.rs: added folders read By Files / By Folders ("How the Files/Programs are
+  separated") with ticked file kinds (Music, Videos, Pictures, Documents, Programs and
+  Scripts); items made as folders with a shortcut in the section's folder; a record of what
+  each source made (load/save_src_record), removal and re-sync (remove_source, sync_sources);
+  deleted items aren't made again; nothing written in the added folders.
+- lib.rs: commands section_sources_sync / section_sources_remove, app_sources.
+- sections.js / xmb.js: the folder dialogs and "Change How ... are separated" menus.
+
+
+------------------------------------------------------------------------
+6. Cache
+------------------------------------------------------------------------
+
+- paths.rs: caches in Windows Temp (%TEMP%\MaXMB) by default; the old in-app temp folder and
+  %TEMP%\PS3 XMB moved there once; wave_cache_temp_file / wave_cache_app_file.
+- lib.rs: wave_cache_load / wave_cache_save (temp or system directory per Save Cache in System
+  Directory, falls back to the other place, keeps one copy).
+- audio.rs: clear_cache categories "wave" and "visualizers" (the latter in memory only);
+  cleanup_temp_files also deletes the temp Wave Cache.
+- Cache Management menu: Delete Wave Cache, Delete Visualizers Cache; switching Save Cache in
+  System Directory re-saves the Wave Cache in its new place and frees the Visualizers Cache when
+  it's no longer kept.
+- cache_tests.rs (new): cache tests with real media (with and without FFmpeg): song covers,
+  photo / video thumbnails, game art waiting for FFmpeg, game folders from game sources.
+
+
+------------------------------------------------------------------------
+7. Internet Browser (LibreWolf)
+------------------------------------------------------------------------
+
+- Keybinds: Browser: Full Screen (F11 / L3) and next tab (Tab), both rebindable; keyboard keys
+  bound to controller buttons act like the controller while the browser has focus (not while
+  typing in a field or with Ctrl / Alt held). keybinds.js: more virtual-key codes.
+- browser.rs: Triangle = right mouse button (mouse_right); pad codes passed to the helper.
+- browser-ext (helper.js, background.js): typing, key handling and page state for the above.
+- Enter Address opens with the current page's full address in it.
+- Page title, address and the hovered link's address scroll when too long (marquee.js).
+- user.js block: privacy.clearOnShutdown.cookies / .offlineApps / .sessions,
+  privacy.clearOnShutdown_v2.cookiesAndStorage = false and network.cookie.lifetimePolicy = 0,
+  so sign-ins stay between sessions in MaXMB's profile (history and cache still cleared).
+- uBlock Origin and Violentmonkey are no longer force-installed (policies.json): only MaXMB's
+  helper add-on is; the entries older versions wrote are removed when they're exactly
+  MaXMB's own (a user's own entries for them are kept). Test added.
+- Folder picker: window centring retried up to 15 s; cursorlock.rs doesn't park the pointer
+  while a picker is open.
+
+
+------------------------------------------------------------------------
+8. Menus, navigation and UI
+------------------------------------------------------------------------
+
+- Drill-in / drill-out transitions (_drillSnap / _drillAnim): the chosen row slides to its
+  anchor (or back), the parent's rows slide and dim as ghosts, the current category moves with
+  them, the others fade in place, the opened list comes in from the right and the list left
+  slides out; uses the items' own CSS transitions (FLIP), new rows' "fresh" state cleared.
+- Hold-to-accelerate only on held input (window.__inputRepeat from keyboard repeat / gamepad
+  repeat), in the XMB columns and in ListPicker, AvatarPicker, PhotoGrid and the media choosers.
+- Fast scrolling: lazy art while gliding fast, loads of removed rows aborted (dropMedia), loads
+  out of reach aborted after 90 ms (watchFarImages); rows built only around the selection.
+- ListPicker rows: name capped at 75% of the row, artist / album in the rest, both scrolling
+  (.lp-sub added to marquee.js).
+- Glows keep running without restarting when moving between items; On-Screen Keyboard focus
+  glow and symbol-panel arrow updated.
+- Users / Account Management Triangle panel layout as on the console.
+- The window is brought to the front at start when it has no focus.
+- api.js: body.picking class while a file picker is open; browser-mode mocks for the new
+  commands.
+
+
+------------------------------------------------------------------------
+9. Performance
+------------------------------------------------------------------------
+
+- Nothing drawn when not seen: the wave, PS3 theme backgrounds (p3tbg.js) and the glass layer
+  sleep while covered or in game, and wake immediately when shown again.
+- Menu tint read without waiting on the graphics card.
+- Original wave capped at 1080 lines; visualizers capped at about 60 fps.
+- Visualizers' GPU memory and the audio graph released when the Music Player closes (unless
+  kept by the cache setting).
+
+
+------------------------------------------------------------------------
+10. Build and project files
+------------------------------------------------------------------------
+
+- tauri.conf.json bundle resources: whole content/Icon, content/Photos, content/Sound Effects
+  and content/Avatars folders (was individual subfolders); the whole resources folder
+  (FFmpeg and the PS3's files in resources/ps3) is bundled.
+- .gitignore: src-tauri/resources/ps3/* (except README.txt) and the old src/assets/wave PS3
+  files.
+- src/js/ps3wave/LICENSE-moyou.txt added.
+- Version 1.0.0 -> 1.1.0.

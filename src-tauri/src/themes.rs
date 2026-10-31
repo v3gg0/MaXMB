@@ -290,10 +290,12 @@ pub fn list_custom(themes_dir: &Path, cache: &Path) -> Vec<Value> {
         let icons = collect_icons(&dir.join("icons"));
         let sounds = collect_sounds(&dir.join("sounds"));
         let thumb = ["preview.png", "preview.jpg", "thumb.png"].iter().map(|f| dir.join(f)).find(|p| p.is_file()).map(|p| p.display().to_string());
+        // a PS3 theme's background / overlay it was made with (its own copy, in p3t/)
+        let p3t = custom_p3t(&dir, &path, &format!("custom:{id}|p3t"));
         out.push(json!({
             "key": format!("custom:{id}"), "name": meta["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(&stem),
             "author": meta["author"], "dir": dir.display().to_string(), "file": path.display().to_string(),
-            "settings": meta["settings"], "icons": icons, "sounds": sounds, "thumb": thumb,
+            "settings": meta["settings"], "icons": icons, "sounds": sounds, "thumb": thumb, "p3t": p3t,
         }));
     }
     if let Ok(rd) = fs::read_dir(cache) {
@@ -303,6 +305,35 @@ pub fn list_custom(themes_dir: &Path, cache: &Path) -> Vec<Value> {
         }
     }
     crate::copies::number_listed(&mut out, "file");
+    out
+}
+
+/// A Custom Theme's own copy of the PS3 theme it was made over (its folder's
+/// p3t/: the unpacked theme, as a PS3 theme is described), or null.
+fn custom_p3t(dir: &Path, source: &Path, key: &str) -> Value {
+    let d = dir.join("p3t");
+    let Some(meta) = fs::read_to_string(d.join("theme.json")).ok().and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok()) else { return Value::Null };
+    let mut v = describe(&d, &meta, source);
+    v["key"] = Value::from(key);
+    v
+}
+
+/// The files of an unpacked PS3 theme's folder, as (path in a Custom Theme's
+/// zip under p3t/, file on disk).
+pub fn p3t_folder_files(dir: &Path) -> Vec<(String, PathBuf)> {
+    fn walk(d: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
+        let Ok(rd) = fs::read_dir(d) else { return };
+        let mut es: Vec<_> = rd.flatten().collect();
+        es.sort_by_key(|e| e.file_name());
+        for e in es {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let r = if rel.is_empty() { n.clone() } else { format!("{rel}/{n}") };
+            let p = e.path();
+            if p.is_dir() { walk(&p, &r, out); } else { out.push((format!("p3t/{r}"), p)); }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
     out
 }
 
@@ -333,6 +364,37 @@ pub fn create_custom(themes_dir: &Path, name: &str, settings: &Value, files: &[(
     }
     z.finish().map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod custom_p3t_tests {
+    use super::*;
+    #[test]
+    fn a_custom_theme_keeps_the_ps3_background_it_was_made_with() {
+        let root = std::env::temp_dir().join(format!("xmb-cp3t-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let themes = root.join("Themes"); let cache = root.join("cache"); let p3 = root.join("p3t-unpacked");
+        fs::create_dir_all(&themes).unwrap(); fs::create_dir_all(p3.join("scene")).unwrap();
+        fs::write(p3.join("theme.json"), r#"{"id":"abc","name":"Rain","background":"bg.png","scene":{"file":"scene/scene.json"},"icons":[]}"#).unwrap();
+        fs::write(p3.join("bg.png"), b"png").unwrap(); fs::write(p3.join("scene/scene.json"), b"{}").unwrap();
+        let files = p3t_folder_files(&p3);
+        assert!(files.iter().any(|(r, _)| r == "p3t/scene/scene.json") && files.iter().any(|(r, _)| r == "p3t/theme.json"), "{files:?}");
+        let settings = json!({ "wallpaper": null, "p3t": { "background": true, "overlay": true } });
+        create_custom(&themes, "Mine", &settings, &files).unwrap();
+        let list = list_custom(&themes, &cache);
+        assert_eq!(list.len(), 1);
+        let t = &list[0];
+        assert_eq!(t["settings"]["p3t"]["background"], true);
+        let key = format!("{}|p3t", t["key"].as_str().unwrap());
+        assert_eq!(t["p3t"]["key"], key.as_str());
+        assert!(t["p3t"]["background"].as_str().unwrap().ends_with("bg.png") && Path::new(t["p3t"]["background"].as_str().unwrap()).is_file());
+        assert!(t["p3t"]["scene"].is_object());
+        // a Custom Theme made without one has none
+        create_custom(&themes, "Plain", &json!({}), &[]).unwrap();
+        let list = list_custom(&themes, &cache);
+        assert!(list.iter().any(|t| t["name"] == "Plain" && t["p3t"].is_null()));
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 // ---- Extracting a PS3 theme ----------------------------------------------------

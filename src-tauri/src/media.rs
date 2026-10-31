@@ -434,6 +434,9 @@ pub fn cache_cover(path: &Path, cache_dir: &Path, ffmpeg: Option<&Path>) -> Opti
                 return None;
             }
             let _ = fs::write(&ptr, name.as_bytes());
+            // (a "no cover" noted before, without FFmpeg, no longer holds: a
+            // left-over marker hid the cover found now whenever FFmpeg was missing)
+            let _ = fs::remove_file(&none_noff);
             Some(f.display().to_string())
         }
         None => {

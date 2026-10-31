@@ -49,89 +49,208 @@ function boxBlur(src, W, H, radius, passes) {
 }
 
 
-// ---- "Default" icon style: the earlier XMB material ------------------------
-// A port of the PS3 icon shader used by github.com/1etu/XMP (two directional
-// lights → Lambert diffuse + dual-lobe Blinn specular, ambient, a luminance
-// "glass" curve, a constant bright refraction background and exposure tone
-// mapping) on a soft bevel built from the icon's silhouette. Matte, without
-// the glossy streak and translucency of the "Glossy" style.
-const LOG2E = 1.4429434537887573;
-const RFLOOR = 0.6669999957084656;
-const LUM = [
-  [0.2044299989938736, -0.7366139888763428],
-  [0.5444409847259521, -0.2599810063838959],
-  [1, 0],
-];
-function light(x, z) {
-  const a = (x * Math.PI) / 180, b = (z * Math.PI) / 180;
-  return [Math.sin(b) * Math.cos(a), Math.sin(b) * Math.sin(a), Math.cos(b)];
-}
-function lumCurve(glass) {
-  const out = [];
-  for (const [i, j, k] of [[0, 1, 2], [1, 0, 2], [2, 0, 1]]) {
-    const x = LUM[i][0], y = LUM[i][1], a = LUM[j][0], b = LUM[k][0];
-    out.push([a, b, (y * glass) / ((x - a) * (x - b))]);
-  }
-  return out;
-}
-const MAT = {
-  ambient: 1.05025,
-  lights: [light(92.4901, 22.4976), light(84.9909, 282.47)],
-  diffuseGain: 3.12367,
-  specGains: [0.484729, 2.45394],
-  specPow: [44.8563, 74.1114],
-  exposure: 1.1574,
-  displayGain: 0.8,
-  refrTweak: 0.0416622,
-  lum: lumCurve(0.0624733),
-  eye: [-278, -299, 1200, 37.485],
-};
-function shadeDefault(d, alpha, S, tintIn, pix = null) {
-  // a 4th value lifts the brightness (bright backgrounds): the dark parts come
-  // up more than the bright ones, so the shading's contrast stays
-  const tint = tintIn.slice(0, 3), lift = Math.max(0, (tintIn[3] || 1) - 1);
-  const BG = 0.85, STR = 2.2 * (S / 96);
-  const h = boxBlur(alpha, S, S, Math.round(4 * S / 96), 2);
-  const m = MAT;
+// ---- "Liquid Glass" icon styles ---------------------------------------------
+// Thick, rounded glass built from the icon's own silhouette (a wide soft bevel,
+// like a drop of liquid): light bends at its rounded edges, so what's behind it
+// is pulled in and magnified there, with a little colour fringing; a bright
+// rim (Fresnel) and a highlight from the top left, a softer one at the bottom.
+//   * "glass" (the filter): the background seen through the glass is a fixed
+//     one, drawn into the picture (the icon colour, lit from above, with a
+//     brighter band low down like the wave), so it costs nothing to show.
+//   * "glasslive" (reactive): the picture has only the glass itself (a light
+//     tint, the rim and the highlights); the real background behind the icon
+//     is bent through it by the page (glassFilter: the same bend as a map).
+// The bevel and the bend of one icon (shared by both styles and the map).
+// wide: the filter version's bevel (~9 % of the glyph, thin strokes rounded
+// all across); narrow (reactive): only the edge is rounded and bends what's
+// behind, the flat face shows it as it is (~4.5 %)
+function glassField(alpha, S, wide = true) {
+  let x0 = S, y0 = S, x1 = 0, y1 = 0;
+  for (let i = 0; i < S * S; i++) if (alpha[i] > 0.15) { const x = i % S, y = (i / S) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  const glyph = Math.max(8, Math.max(x1 - x0, y1 - y0));
+  // (a wide bevel: ~9 % of the glyph, so thin strokes are rounded all across)
+  const rad = Math.max(2, Math.round(glyph * (wide ? 0.09 : 0.045)));
+  const h = boxBlur(alpha, S, S, rad, wide ? 3 : 2);
+  const STR = 1.25 * (2 * rad + 1);
+  const nx = scratchF32("gnx", S * S), ny = scratchF32("gny", S * S);
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-    const i = y * S + x, o = i * 4;
-    const a = alpha[i];
-    if (d[o + 3] === 0) { d[o] = d[o + 1] = d[o + 2] = 0; continue; }
+    const i = y * S + x;
+    if (alpha[i] <= 0) { nx[i] = ny[i] = 0; continue; }
     const xl = h[y * S + Math.max(0, x - 1)], xr = h[y * S + Math.min(S - 1, x + 1)];
     const yt = h[Math.max(0, y - 1) * S + x], yb = h[Math.min(S - 1, y + 1) * S + x];
-    let nx = -((xr - xl) * 0.5) * STR, ny = -((yb - yt) * 0.5) * STR;
-    const nn = nx * nx + ny * ny; if (nn > 1) { const s = 1 / Math.sqrt(nn); nx *= s; ny *= s; }
-    const nz = Math.sqrt(Math.max(0, 1 - Math.min(1, nx * nx + ny * ny)));
-    const u = (x + 0.5) / S, v = (y + 0.5) / S;
-    const ex = m.eye[0] - (u - 0.5) * m.eye[3], ey = m.eye[1] - (v - 0.5) * m.eye[3], ez = m.eye[2];
-    const el = Math.hypot(ex, ey, ez), vx = ex / el, vy = ey / el, vz = ez / el;
-    const weight = RFLOOR + (1 - RFLOOR) * Math.pow(Math.max(0, Math.min(1, nz)), m.refrTweak * 10);
-    const rr = 1 + (BG - 1) * weight;
-    const Y = 0.299072 * rr + 0.586914 * rr + 0.114014 * rr;
-    let remap = Y;
-    for (const c of m.lum) remap += (Y - c[0]) * (Y - c[1]) * c[2];
-    let lamb = 0, spec = 0;
-    for (let k = 0; k < 2; k++) {
-      const L = m.lights[k];
-      const nl = Math.max(0, nx * L[0] + ny * L[1] + nz * L[2]); lamb += nl;
-      if (nl === 0) continue;
-      const hx = vx + L[0], hy = vy + L[1], hz = vz + L[2];
-      const nh = Math.max(0, (nx * hx + ny * hy + nz * hz) / Math.hypot(hx, hy, hz));
-      spec += Math.pow(nh, m.specPow[k]) * m.specGains[k];
+    let a = -(xr - xl) * 0.5 * STR, b = -(yb - yt) * 0.5 * STR;
+    const n = Math.hypot(a, b); if (n > 0.96) { a *= 0.96 / n; b *= 0.96 / n; }
+    nx[i] = a; ny[i] = b;
+  }
+  return { nx, ny };
+}
+// how far the background is pulled in (a fraction of the icon's size) for a
+// surface tilted by t (0 flat .. 1 on edge): nothing on the flat face, most at the rim
+const GLASS_BEND = 0.035;
+const bendOf = (t) => GLASS_BEND * Math.pow(t, 2.2);
+const GL_L1 = (() => { const v = [-0.45, -0.75, 0.6], l = Math.hypot(...v); return v.map((c) => c / l); })();
+const GL_L2 = (() => { const v = [0.5, 0.7, 0.55], l = Math.hypot(...v); return v.map((c) => c / l); })();
+function shadeGlass(d, alpha, S, tintIn, pix, live, solid) {
+  const tint = tintIn.slice(0, 3);
+  const { nx, ny } = glassField(alpha, S, !live);
+  // the fixed background of the filter version, at (u, v) of the icon
+  const env = (u, v, k) => {
+    const sky = 0.97 - 0.42 * Math.min(1, Math.max(0, v));                 // lit from above
+    const band = 0.38 * Math.exp(-(((v - 0.68 + 0.08 * Math.sin(u * 5.2)) / 0.11) ** 2));   // the wave, low down
+    return Math.min(1.15, sky + band) * tint[k];
+  };
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const i = y * S + x, o = i * 4, a = alpha[i];
+    if (a <= 0) { d[o] = d[o + 1] = d[o + 2] = d[o + 3] = 0; continue; }
+    const X = nx[i], Y = ny[i], t = Math.min(1, Math.hypot(X, Y)), Z = Math.sqrt(Math.max(0, 1 - t * t));
+    const F = Math.pow(1 - Z, 2.2);                                          // rim (Fresnel)
+    const h1 = Math.max(0, -X * GL_L1[0] - Y * GL_L1[1] + Z * GL_L1[2]);    // (normals point out: x right, y down)
+    const h2 = Math.max(0, -X * GL_L2[0] - Y * GL_L2[1] + Z * GL_L2[2]);
+    const spec = Math.pow(h1, 28) * 0.95 * Math.min(1, F * 4 + 0.15) + Math.pow(h2, 18) * 0.35 * Math.min(1, F * 5);
+    let r, g, b, al;
+    if (live) {
+      // the glass alone: a light tint over the bent background, a stronger rim
+      // (lit from above like the console's glass: brighter at the top; a
+      // fairly solid pale body, as in captures of the console, with what's
+      // behind still showing through it)
+      const v = (y + 0.5) / S, k = (0.66 + 0.22 * F) * (1.1 - 0.2 * v);
+      r = tint[0] * k + spec + F * 0.18; g = tint[1] * k + spec + F * 0.18; b = tint[2] * k + spec + F * 0.18;
+      al = solid ? 1 : Math.min(1, 0.42 + 0.42 * F + spec);
+    } else {
+      // the fixed background, pulled in at the rim, each colour a little apart
+      const u = (x + 0.5) / S, v = (y + 0.5) / S, bend = bendOf(t) / Math.max(1e-6, t);
+      const du = -X * bend, dv = -Y * bend, sp = 0.18;
+      const base = [env(u + du * (1 - sp), v + dv * (1 - sp), 0), env(u + du, v + dv, 1), env(u + du * (1 + sp), v + dv * (1 + sp), 2)];
+      const k = 0.82 + 0.18 * (1 - F);
+      r = base[0] * k + spec + F * 0.32; g = base[1] * k + spec + F * 0.32; b = base[2] * k + spec + F * 0.32;
+      al = solid ? 1 : Math.min(1, 0.58 + 0.38 * F + spec);
     }
-    const bodyk = remap * (m.ambient + lamb * m.diffuseGain);
-    const linear = bodyk + spec;
-    let out = m.displayGain * (1 - Math.pow(2, -linear * m.exposure * LOG2E));
-    if (lift) out = out + (1 - out) * lift;
-    // (a theme's picture keeps its own colours: they take the place of white)
-    for (let k = 0; k < 3; k++) d[o + k] = Math.max(0, Math.min(255, Math.round(255 * out * tint[k] * (pix ? pix[i * 3 + k] / 255 * 1.2 : 1))));
-    d[o + 3] = Math.round(255 * a);
+    if (pix) { r *= pix[i * 3] / 255 * 1.15; g *= pix[i * 3 + 1] / 255 * 1.15; b *= pix[i * 3 + 2] / 255 * 1.15; }
+    const m = Math.max(al, r, g, b, 1e-6), A = Math.min(1, m);
+    d[o] = Math.round(255 * Math.min(1, r / A)); d[o + 1] = Math.round(255 * Math.min(1, g / A)); d[o + 2] = Math.round(255 * Math.min(1, b / A));
+    d[o + 3] = Math.round(255 * Math.min(1, al > m ? al : A) * a);
+  }
+}
+// The reactive style's lens, as data for the glass layer (glasslayer.js), which
+// draws the real background bent through each icon on the graphics card: one
+// RGBA picture per icon, made once: red / green the surface's tilt (mid grey:
+// flat; the layer pulls what's behind in along it, most at the rim), blue the
+// rim's strength, alpha the icon's own shape.
+const _glassMaps = new Map();
+const LENS_S = 96;
+let _glassMapId = 0;
+export function glassMap(key, img) {
+  const hit = _glassMaps.get(key);
+  if (hit) return hit;
+  if (!img) return null;
+  try {
+    const S = LENS_S;
+    const [, ctx] = scratchCanvas(S);
+    ctx.clearRect(0, 0, S, S);
+    const iw = img.naturalWidth || img.width || S, ih = img.naturalHeight || img.height || S;
+    const sc = Math.min(S / iw, S / ih), dw = iw * sc, dh = ih * sc;
+    ctx.drawImage(img, (S - dw) / 2, (S - dh) / 2, dw, dh);
+    const d = ctx.getImageData(0, 0, S, S).data;
+    const alpha = scratchF32("lalpha", S * S);
+    for (let i = 0; i < S * S; i++) alpha[i] = d[i * 4 + 3] / 255;
+    const { nx, ny } = glassField(alpha, S, true);
+    const out = new Uint8Array(S * S * 4);
+    for (let i = 0; i < S * S; i++) {
+      const X = nx[i], Y = ny[i], t = Math.min(1, Math.hypot(X, Y)), Z = Math.sqrt(Math.max(0, 1 - t * t));
+      out[i * 4] = Math.round(127.5 + 127.5 * Math.max(-1, Math.min(1, X)));
+      out[i * 4 + 1] = Math.round(127.5 + 127.5 * Math.max(-1, Math.min(1, Y)));
+      out[i * 4 + 2] = Math.round(255 * Math.pow(1 - Z, 1.6));
+      out[i * 4 + 3] = Math.round(255 * alpha[i]);
+    }
+    // (an id never used before, even after the cache is cleared: the glass
+    // layer keeps each map's texture under its id, so a reused id would give an
+    // icon another icon's glass shape)
+    const m = { w: S, h: S, data: out, id: ++_glassMapId };
+    _glassMaps.set(key, m);
+    return m;
+  } catch (e) {
+    _scratch.canvas = null; _scratch.ctx = null;
+    return null;
+  }
+}
+
+// Icon Styles "Glow" and "Glow (Pulsating)": the glow around an icon, as a mask
+// (white where it glows): the icon's shape spread out and softened, with the
+// icon itself cut out of it, so the glow is only around the icon and never
+// shows through its glass. The picture is GLOW_PAD times the icon's box (the
+// page puts it over a box that much bigger) and coloured by the page.
+export const GLOW_PAD = 1.6;
+// The colour of an icon's border as drawn (its shaded picture's outermost
+// solid pixels, averaged): the Glow styles glow in it. "r,g,b" or null.
+const _edgeColors = new Map();
+export function edgeColor(img, key) {
+  if (key && _edgeColors.has(key)) return _edgeColors.get(key);
+  if (!img) return null;
+  try {
+    const S = 96;
+    const [, ctx] = scratchCanvas(S);
+    ctx.clearRect(0, 0, S, S);
+    const iw = img.naturalWidth || img.width || S, ih = img.naturalHeight || img.height || S;
+    const sc = Math.min(S / iw, S / ih), dw = iw * sc, dh = ih * sc;
+    ctx.drawImage(img, (S - dw) / 2, (S - dh) / 2, dw, dh);
+    const d = ctx.getImageData(0, 0, S, S).data;
+    const A = (x, y) => (x < 0 || y < 0 || x >= S || y >= S ? 0 : d[(y * S + x) * 4 + 3]);
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const a = A(x, y);
+      if (a < 128) continue;
+      // (a solid pixel next to a see-through one: the border)
+      if (A(x - 1, y) >= 64 && A(x + 1, y) >= 64 && A(x, y - 1) >= 64 && A(x, y + 1) >= 64) continue;
+      const o = (y * S + x) * 4;
+      r += d[o]; g += d[o + 1]; b += d[o + 2]; n++;
+    }
+    const v = n ? [r, g, b].map((c) => Math.round(c / n)).join(",") : null;
+    if (key) _edgeColors.set(key, v);
+    return v;
+  } catch (e) {
+    _scratch.canvas = null; _scratch.ctx = null;
+    return null;
+  }
+}
+const _glowMasks = new Map();
+export function glowMask(key, img) {
+  const hit = _glowMasks.get(key);
+  if (hit) return hit;
+  if (!img) return null;
+  try {
+    const S = 128, P = Math.round(S * GLOW_PAD), off = (P - S) / 2;
+    const [cv, ctx] = scratchCanvas(P);
+    ctx.clearRect(0, 0, P, P);
+    const iw = img.naturalWidth || img.width || S, ih = img.naturalHeight || img.height || S;
+    const sc = Math.min(S / iw, S / ih), dw = iw * sc, dh = ih * sc;
+    ctx.drawImage(img, off + (S - dw) / 2, off + (S - dh) / 2, dw, dh);
+    const id = ctx.getImageData(0, 0, P, P), d = id.data;
+    const a = scratchF32("galpha", P * P);
+    for (let i = 0; i < P * P; i++) a[i] = d[i * 4 + 3] / 255;
+    // two widths: a tight bright halo and a wide soft one
+    const near = boxBlur(a, P, P, Math.max(2, Math.round(S * 0.035)), 3).slice();
+    const far = boxBlur(a, P, P, Math.max(3, Math.round(S * 0.09)), 3).slice();
+    // (everything see-through on and around the icon glows: its borders and
+    // the gaps and holes inside it alike; the icon itself stays clear)
+    for (let i = 0; i < P * P; i++) {
+      const g = Math.min(1, near[i] * 1.6 + far[i] * 0.9) * (1 - a[i]);
+      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = 255; d[i * 4 + 3] = Math.round(255 * g);
+    }
+    ctx.putImageData(id, 0, 0);
+    const u = cv.toDataURL(), i = u.indexOf(","), bin = atob(u.slice(i + 1)), arr = new Uint8Array(bin.length);
+    for (let k = 0; k < bin.length; k++) arr[k] = bin.charCodeAt(k);
+    const url = URL.createObjectURL(new Blob([arr], { type: "image/png" }));
+    _glowMasks.set(key, url);
+    return url;
+  } catch (e) {
+    _scratch.canvas = null; _scratch.ctx = null;
+    return null;
   }
 }
 
 const _cache = new Map();
 // bump when the look changes, so saved images from an older look aren't reused
-const SHADE_VERSION = "g2";
+const SHADE_VERSION = "g7";
 export const colorKey = (rgb) => rgb.map((c) => Math.round(c * 255)).join(",");
 const _ck = (key, rgb) => SHADE_VERSION + "|" + key + "|" + colorKey(rgb);
 let _added = 0;
@@ -166,6 +285,18 @@ export function pruneShades(colorKeys) {
   return n;
 }
 export function shadeCacheSize() { return _cache.size; }
+// (what's in memory, for checking: the pictures' keys, how many lenses and glow shapes)
+export function shadeCacheInfo() { return { keys: [..._cache.keys()], lenses: _glassMaps.size, glows: _glowMasks.size }; }
+// Cache Management > Delete Icon Shading (or Delete All Cache): every shaded
+// picture, lens and glow shape forgotten too (not only the saved file), so the
+// icons are all made again
+export function clearShades() {
+  for (const v of _cache.values()) { const b = _blobUrls.get(v); if (b) { URL.revokeObjectURL(b); _blobUrls.delete(v); } }
+  _cache.clear(); _added = 0;
+  _glassMaps.clear();
+  for (const u of _glowMasks.values()) { try { URL.revokeObjectURL(u); } catch (e) {} }
+  _glowMasks.clear(); _edgeColors.clear();
+}
 // how many new images were made since the last call (to know when to save)
 export function takeNewShadeCount() { const n = _added; _added = 0; return n; }
 // the shaded image for this icon + colour if it's been made already
@@ -188,7 +319,28 @@ export function shadeSrc(u) {
   }
   return b;
 }
-export function cachedShade(key, colorRgb, style = "glossy") { return _cache.get(_ck(style === "default" ? "d:" + key : key, colorRgb)) || null; }
+// (each style's images under their own name; "~" can't start a picture's name or path)
+const STYLE_PREFIX = { glossy: "~g~", glass: "~lg~", glasslive: "~lgl~" };
+const _sk = (style, key) => (STYLE_PREFIX[style] || STYLE_PREFIX.glossy) + key;
+// Another Icon Style chosen: the images made for every other style are dropped
+// (with their blob: links), and so are the reactive glass's filters when it's
+// no longer in use. keep: the styles still drawn (the reactive styles also
+// keep the plain Liquid Glass, used for custom pictures). How many were dropped.
+export function dropOtherStyles(keep) {
+  const pre = keep.filter((s) => STYLE_PREFIX[s]).map((s) => STYLE_PREFIX[s]);
+  let n = 0;
+  for (const [k, v] of _cache) {
+    const name = k.slice(k.indexOf("|") + 1);
+    if (pre.some((p) => name.startsWith(p))) continue;
+    _cache.delete(k); n++;
+    const b = _blobUrls.get(v);
+    if (b) { URL.revokeObjectURL(b); _blobUrls.delete(v); }
+  }
+  if (!keep.includes("glasslive")) _glassMaps.clear();
+  if (!keep.includes("glow")) { for (const u of _glowMasks.values()) { try { URL.revokeObjectURL(u); } catch (e) {} } _glowMasks.clear(); _edgeColors.clear(); }
+  return n;
+}
+export function cachedShade(key, colorRgb, style = "glossy") { return _cache.get(_ck(_sk(style, key), colorRgb)) || null; }
 
 // Shade one icon image to a tinted glass data URL (cached by name + colour).
 //
@@ -214,7 +366,7 @@ export function shadeIcon(img, colorRgb, key, style = "glossy", own = false, cro
   }
 }
 function _shadeIcon(img, colorRgb, key, style, own, crop) {
-  const ck = _ck(style === "default" ? "d:" + key : key, colorRgb);
+  const ck = _ck(_sk(style, key), colorRgb);
   const hit = _cache.get(ck);
   if (hit) return hit;
   const S = 192;
@@ -228,9 +380,9 @@ function _shadeIcon(img, colorRgb, key, style, own, crop) {
   const alpha = scratchF32("alpha", S * S);
   let pix = null;
   if (own) { pix = scratchU8("pix", S * S * 3); for (let i = 0; i < S * S; i++) { pix[i * 3] = d[i * 4]; pix[i * 3 + 1] = d[i * 4 + 1]; pix[i * 3 + 2] = d[i * 4 + 2]; } }
-  if (style === "default") {
+  if (style === "glass" || style === "glasslive") {
     for (let i = 0; i < S * S; i++) alpha[i] = d[i * 4 + 3] / 255;
-    shadeDefault(d, alpha, S, colorRgb, pix);
+    shadeGlass(d, alpha, S, colorRgb, pix, style === "glasslive", String(key).includes("|solid"));
     ctx.putImageData(id, 0, 0);
     const u = crop ? _cropUrl(cv, S, dw, dh) : cv.toDataURL(); _cache.set(ck, u); _added++;
     return u;

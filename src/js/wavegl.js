@@ -6,6 +6,18 @@
 // dots on-off, background colour, and wallpaper transparency).
 //
 // Source: https://github.com/linkev/PlayStation-3-XMB (MIT License)
+//
+// Month and Time Colors: the console's own month / time-of-day background
+// (ps3wave/background.js: drawn from its lines.qrc, or measured without it).
+
+import { ps3Background } from "./ps3wave/background.js";
+
+// the whole screen covered (the Photo Viewer, the Video Player, a Music Player
+// visualizer): the wave isn't drawn meanwhile
+export function screenCovered() {
+  const c = document.body.classList;
+  return c.contains("mpfull") || c.contains("pv-open") || c.contains("video-open");
+}
 
 // ---- default tuning (from spline-settings.js / particles-settings.js) ----
 export const REAL_WAVE_DEFAULTS = {
@@ -184,8 +196,10 @@ export function xmbDayFactor(d = new Date()) {
   const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
   return h < 12 ? ss(4, 7, h) : 1 - ss(17, 20, h);
 }
-export function monthGradient(d = new Date()) {
-  const m = d.getMonth(), f = xmbDayFactor(d);
+// (m: a month to show instead of the date's own, 0-11: a PS3 theme's colour)
+export function monthGradient(d = new Date(), m = null) {
+  if (m == null) m = d.getMonth();
+  const f = xmbDayFactor(d);
   const day = COMPLEX_GRADIENT_PRESETS[m * 2], night = COMPLEX_GRADIENT_PRESETS[m * 2 + 1];
   const mix = (a, b) => a.map((v, i) => (b[i] + (v - b[i]) * f) / 255);
   const ang = (night[1] + (day[1] - night[1]) * f) * Math.PI / 180;
@@ -225,8 +239,10 @@ function resolveComplexGradient(s, useOwn) {
   const span = Math.max(0.02, Math.min(1, s.bgSpan ?? 1));
   return { startRgb: start, endRgb: end, dir, tMin: range.tMin, tSpan: range.tSpan * span, curve: Math.max(0.2, Math.min(4, s.bgCurve ?? 1)) };
 }
-function resolveBackgroundGradient(s, useDefault, _dayF, month) {
-  if (month && useDefault) return monthGradient();
+// month: true for the month's own colours (Month and Time Colors), or
+// { m } for a given month's (a PS3 theme's colour)
+export function resolveBackgroundGradient(s, useDefault, _dayF, month) {
+  if (month && useDefault) return monthGradient(new Date(), month.m ?? null);
   if ("bgTopR" in s) return resolveComplexGradient(s, useDefault);
   const dir = [0, 1];
   const range = computeDirRange(dir[0], dir[1]);
@@ -433,6 +449,8 @@ class PS3SplineReversePipeline {
 // canvas is a CSS filter on top)
 let INTRO_BG = 1;
 const LIVE = new Set();
+// (the Original wave reads it every frame)
+export const introBg = () => INTRO_BG;
 export function setIntroBg(v) {
   v = Math.max(0, Math.min(1, +v));
   if (Math.abs(v - INTRO_BG) < 1e-4) return;
@@ -492,6 +510,25 @@ function createSplineLayer(gl, settings) {
        oColor=vec4(uTint, clamp((F+fill)*opacity*brightness*edge,0.0,1.0)); }`);
 
   const bgVAO = createFullscreenQuad(gl, bgProg);
+  // (the console's background picture, stretched to the screen, in place of the gradient)
+  const texProg = link(gl,
+    `#version 300 es
+     precision highp float;
+     in vec2 aPos; out vec2 vUv;
+     void main(){ vUv=vec2(aPos.x*0.5+0.5,1.0-(aPos.y*0.5+0.5)); gl_Position=vec4(aPos,0.0,1.0); }`,
+    `#version 300 es
+     precision highp float;
+     in vec2 vUv; out vec4 oColor; uniform sampler2D uBg; uniform float uK;
+     void main(){ oColor=vec4(texture(uBg,vUv).rgb*uK,1.0); }`);
+  const texVAO = createFullscreenQuad(gl, texProg);
+  const bgTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, bgTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  let bgTexVersion = -1;
+  const texU = { bg: uloc(gl, texProg, "uBg"), k: uloc(gl, texProg, "uK") };
   const grid = createGrid(gl, waveProg, 100);
   const STEX_W = 256, STEX_H = 64;
   const splineData = new Float32Array(STEX_W * STEX_H);
@@ -518,7 +555,13 @@ function createSplineLayer(gl, settings) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, STEX_W, STEX_H, gl.RED, gl.FLOAT, splineData);
 
     gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
-    if (!opts.wallpaper) {
+    if (!opts.wallpaper && opts.bgImage) {
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, bgTex);
+      if (opts.bgVersion !== bgTexVersion) { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, opts.bgImage); bgTexVersion = opts.bgVersion; }
+      gl.useProgram(texProg); gl.bindVertexArray(texVAO);
+      gl.uniform1i(texU.bg, 0); gl.uniform1f(texU.k, INTRO_BG);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    } else if (!opts.wallpaper) {
       const bg = resolveBackgroundGradient(settings, opts.autoColor, opts.dayFactor, opts.month);
       gl.useProgram(bgProg); gl.bindVertexArray(bgVAO);
       const k = INTRO_BG;
@@ -720,8 +763,8 @@ export class RealWave {
   setBaseColor(rgb, isAuto) { this.autoColor = isAuto !== false; if (rgb) { this.settings.colorR = rgb.r; this.settings.colorG = rgb.g; this.settings.colorB = rgb.b; } }
   setWaveColor(rgb) { this.waveAuto = !rgb; this.tint = rgb ? [rgb.r / 255, rgb.g / 255, rgb.b / 255] : [1, 1, 1]; }
   setDotColor(rgb) { this.dotRgb = rgb ? [rgb.r / 255, rgb.g / 255, rgb.b / 255] : [1, 1, 1]; }
-  setWavesEnabled(on) { this.wavesEnabled = on !== false; }
-  setDotsEnabled(on) { this.dotsEnabled = on !== false; }
+  setWavesEnabled(on) { this.wavesEnabled = on !== false; this._kick(); }
+  setDotsEnabled(on) { this.dotsEnabled = on !== false; this._kick(); }
   // Controller motion (gyroscope): main.js feeds the current offset target
   // (screen units, -1..1); the sparkles ease toward it.
   // Sideways, a sweep of the controller pushes every sparkle that way: they
@@ -744,10 +787,35 @@ export class RealWave {
     return c;
   }
   setMonthMode(on) { this.monthMode = !!on; }
+  // A PS3 theme's colour (a month, 0-11; null: none): that month's own
+  // background and wave colours, as the Original wave shows them (the
+  // console's own background when its files are there, else linkev's
+  // gradient for that month), instead of the month's colour as a plain
+  // Background Color
+  setThemeMonth(m) {
+    this.themeMonth = m == null ? null : m;
+    try { ps3Background().setThemeMonth(this.themeMonth); } catch (e) {}
+    this._lpDirty = true; this._sig = null;
+  }
+  _month() { return this.monthMode && (this.themeMonth != null ? { m: this.themeMonth } : true); }
+  // Month and Time Colors with the console's files: its own background
+  // (null: linkev's month gradients)
+  _ps3() {
+    if (!(this.monthMode && this.autoColor)) return null;
+    const b = ps3Background();
+    if (b.refresh() || (b.ok && b.version !== this._ps3Ver)) { this._ps3Ver = b.version; this._lpDirty = true; }
+    return b.ok && b.pixels ? b : null;
+  }
+  // the background's gradient (the console's: its top and bottom rows)
+  _gradient() {
+    const b = this._ps3(), e = b && b.ends();
+    if (e) return { startRgb: e[0], endRgb: e[1], dir: [0, 1], tMin: 0, tSpan: 1 };
+    return resolveBackgroundGradient(this.settings, this.autoColor, 1, this._month());
+  }
   // The background's colour right now (0..1 rgb): the middle of its gradient,
   // leaning to the brighter end. Used to tint the option (△) menus.
   backgroundColor() {
-    const g = resolveBackgroundGradient(this.settings, this.autoColor, 1, this.monthMode);
+    const g = this._gradient();
     const lum = (c) => c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
     const [hi, lo] = lum(g.startRgb) >= lum(g.endRgb) ? [g.startRgb, g.endRgb] : [g.endRgb, g.startRgb];
     return hi.map((v, i) => v * 0.7 + lo[i] * 0.3);
@@ -755,18 +823,20 @@ export class RealWave {
   // the background's brighter end right now (0..1 rgb): Icon Color "Original"
   // is made from it
   backgroundBright() {
-    const g = resolveBackgroundGradient(this.settings, this.autoColor, 1, this.monthMode);
+    const g = this._gradient();
     const lum = (c) => c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
     return lum(g.startRgb) >= lum(g.endRgb) ? g.startRgb : g.endRgb;
   }
-  setWallpaper(on) { this.wallpaper = !!on; }
+  setWallpaper(on) { this.wallpaper = !!on; this._kick(); }
   // the background gradient drawn by the page instead (an Overlay over the
   // Background Color: the overlay goes between the gradient and the wave)
   setBgOff(on) { this.bgOff = !!on; }
   // the background gradient as a small picture (the same formula as the
   // shader, in the same 0-1 space; stretched to the screen it's the same)
   backgroundImage(size = 128) {
-    const g = resolveBackgroundGradient(this.settings, this.autoColor, 1, this.monthMode);
+    const b = this._ps3();
+    if (b) return b.image.toDataURL("image/png");
+    const g = resolveBackgroundGradient(this.settings, this.autoColor, 1, this._month());
     const c = document.createElement("canvas"); c.width = c.height = size;
     const ctx = c.getContext("2d"), img = ctx.createImageData(size, size), d = img.data;
     const curve = g.curve ?? 1;
@@ -781,7 +851,9 @@ export class RealWave {
     ctx.putImageData(img, 0, 0);
     return c.toDataURL("image/png");
   }
-  setHidden(h) { this.hidden = !!h; }
+  setHidden(h) { const was = this.hidden; this.hidden = !!h; if (was && !this.hidden) this._kick(); }
+  // (shown again: drawn on the next frame, not after the idle wait)
+  _kick() { if (this._sleepT && this.running) { clearTimeout(this._sleepT); this._sleepT = 0; requestAnimationFrame(this._loop); } }
 
   // ---- Wave and Sparkles Personalization (linkev spline + particle params) ----
   // The spline / particle layers read from these two objects live every frame
@@ -831,20 +903,24 @@ export class RealWave {
   setStill(on) { on = !!on; if (on === !!this.still) return; this.still = on; this._sig = null; }
   _stillSig() {
     return JSON.stringify([this.settings, this.particleSettings, this.tint, this.dotRgb, this.waveAuto, this.complexAuto, this.autoColor,
-      this.wavesEnabled, this.dotsEnabled, this.wallpaper, this.bgOff, this.hidden, this.monthMode, this.canvas.width, this.canvas.height,
+      this.wavesEnabled, this.dotsEnabled, this.wallpaper, this.bgOff, this.hidden, this.monthMode, this.themeMonth, this.canvas.width, this.canvas.height,
       Math.floor(Date.now() / 60000)]);   // (the month / time-of-day colour moves on by the minute)
   }
+  // nothing of it to see: hidden behind an item's own background, or over a
+  // picture / PS3 theme background with the waves and the sparkles both off
+  _idle() { return this.hidden || ((this.wallpaper || this.bgOff) && !this.wavesEnabled && !this.dotsEnabled); }
   _loop(now) {
     if (!this.running) return;
-    const lp = this.lowPower || 0;
-    if (lp || this.still) {
+    const lp = this.lowPower || 0, cov = screenCovered(), idle = this._idle();
+    if (lp || this.still || cov || idle) {
       // frozen: time doesn't move on; the same frame is drawn again only after
-      // a resize (which clears the canvas) or, holding still, a change to it
+      // a resize (which clears the canvas) or, holding still (or with nothing
+      // to show), a change to it; nothing is drawn while the screen is covered
       this._prev = now;
       let draw = this._lpDirty;
-      if (this.still && !lp) { const sig = this._stillSig(); if (sig !== this._sig) { this._sig = sig; draw = true; } }
-      if (draw) { this._lpDirty = false; this._render(); }
-      setTimeout(() => requestAnimationFrame(this._loop), lp >= 2 ? 1000 : 250); return;
+      if ((this.still || idle) && !lp) { const sig = this._stillSig(); if (sig !== this._sig) { this._sig = sig; draw = true; } }
+      if (draw && !cov) { this._lpDirty = false; this._render(); }
+      this._sleepT = setTimeout(() => { this._sleepT = 0; requestAnimationFrame(this._loop); }, lp >= 2 ? 1000 : 250); return;
     }
     this._sig = null;
     // FPS Cap (Display Settings): frames in between are skipped (the motion
@@ -865,12 +941,13 @@ export class RealWave {
     const gl = this.gl; if (!gl) return;
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    if (this.hidden) return;
-    this._renderScene();
+    if (!this.hidden) this._renderScene();
+    // (the reactive glass icons bend this frame: glasslayer.js)
+    if (window.__onWaveFrame) window.__onWaveFrame(this.canvas);
   }
   // Complex style, Wave Color "Auto": its background's lower colour, lightened
   _complexAutoTint() {
-    if (this.monthMode && this.autoColor) return monthWaveTint(monthGradient(), Math.max(0, Math.min(1, this.settings.autoTintWhite ?? 0.35)));
+    if (this.monthMode && this.autoColor) return monthWaveTint(this._ps3() ? this._gradient() : monthGradient(new Date(), this.themeMonth), Math.max(0, Math.min(1, this.settings.autoTintWhite ?? 0.35)));
     const g = resolveBackgroundGradient(this.settings, this.autoColor, 1), w = Math.max(0, Math.min(1, this.settings.autoTintWhite ?? 1));
     const k = this.settings.autoTintBoost ?? 1;
     return g.endRgb.map((c) => { const b = Math.min(1, c * k); return b + (1 - b) * w; });
@@ -879,7 +956,8 @@ export class RealWave {
     const gl = this.gl;
     // In wallpaper mode the bg gradient is skipped so the DOM wallpaper shows.
     // (Complex starts 36 s into its motion: the shape of the reference captures)
-    this.splineLayer.render(this._tWave + 36, { wallpaper: this.wallpaper || this.bgOff, waves: this.wavesEnabled, tint: (this.complexAuto ?? this.waveAuto) ? this._complexAutoTint() : this.tint, autoColor: this.autoColor, dayFactor: 1, month: this.monthMode });
+    const ps3 = this._ps3();
+    this.splineLayer.render(this._tWave + 36, { wallpaper: this.wallpaper || this.bgOff, waves: this.wavesEnabled, bgImage: ps3 ? ps3.image : null, bgVersion: ps3 ? ps3.version : -1, tint: (this.complexAuto ?? this.waveAuto) ? this._complexAutoTint() : this.tint, autoColor: this.autoColor, dayFactor: 1, month: this._month() });
     // the sparkles follow the wave's centre line (even with the waves off)
     // with the waves off they stay level across the middle of the screen
     const waveY = this.wavesEnabled ? this.splineLayer.centerline(this._tWave + 36) : null;

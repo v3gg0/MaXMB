@@ -53,6 +53,27 @@ pub fn scan(paths: &[String], icon_cache: Option<&Path>) -> Vec<Game> {
     games
 }
 
+/// A shortcut (or program) put straight into the Games folder by hand gets a
+/// folder of its own named after it, the same as in a custom section, so it's
+/// found and given its game.json like any other game.
+pub fn wrap_loose_shortcuts(root: &Path) {
+    let Ok(rd) = fs::read_dir(root) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() { continue; }
+        let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if !crate::media::APP_EXTS.contains(&ext.as_str()) { continue; }
+        let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let name = crate::sections::safe_name(&stem);
+        let mut dir = root.join(&name);
+        let mut n = 2;
+        while dir.exists() { dir = root.join(format!("{name} ({n})")); n += 1; }
+        if fs::create_dir_all(&dir).is_err() { continue; }
+        let to = dir.join(p.file_name().unwrap_or_default());
+        if fs::rename(&p, &to).is_err() { let _ = fs::remove_dir(&dir); }
+    }
+}
+
 /// Only one game can be the disc: the one whose game.json was set most
 /// recently wins, the others are switched back to false (in their files too).
 fn resolve_disc(games: &mut [Game]) {
@@ -147,7 +168,8 @@ pub(crate) fn parse_game(dir: &Path, album: Option<String>, icon_cache: Option<&
         // files from before "starts" existed had their size worked out by the
         // system: Size is now only ever set by hand, so it starts blank
         if !m.contains_key("starts") { m.insert("size".into(), Value::String(String::new())); }
-        let target = launch_path(dir, &launch);
+        // (a game started through Steam: the exe it was found by)
+        let target = launch_path(dir, &launch).or_else(|| m.get("sourceExe").and_then(|v| v.as_str()).map(PathBuf::from).filter(|p| p.exists()));
         let s = scrape(target.as_deref(), &folder_name, shortcut.as_deref(), legacy_txt.as_ref());
         for (k, v) in s { m.entry(k).or_insert(v); }
         for k in LEGACY { m.remove(k); }
@@ -372,6 +394,22 @@ fn first_with_ext(dir: &Path, ext: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn loose_shortcut_gets_a_folder() {
+        let root = std::env::temp_dir().join(format!("xmb_wrap_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Old Game")).unwrap();
+        fs::write(root.join("Old Game").join("Old.lnk"), b"x").unwrap();
+        fs::write(root.join("My Game.lnk"), b"x").unwrap();
+        fs::write(root.join("notes.txt"), b"x").unwrap();
+        wrap_loose_shortcuts(&root);
+        assert!(root.join("My Game").join("My Game.lnk").is_file());
+        assert!(root.join("notes.txt").is_file());
+        assert!(root.join("Old Game").join("Old.lnk").is_file());
+        assert!(is_game_dir(&root.join("My Game")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
     use super::*;
 
     #[test]

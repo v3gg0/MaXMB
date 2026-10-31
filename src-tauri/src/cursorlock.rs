@@ -35,7 +35,8 @@ pub fn cursor_lock(app: AppHandle, lock: bool) {
         std::thread::spawn(move || {
             let mut was = false;
             loop {
-                let on = LOCKED.load(Ordering::SeqCst);
+                // (a file / folder window open: the pointer is the controller's there, never parked)
+                let on = LOCKED.load(Ordering::SeqCst) && !crate::browser::picker_active();
                 if on {
                     let hwnd = app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize).unwrap_or(0);
                     if hwnd != 0 && win::is_foreground(hwnd) {

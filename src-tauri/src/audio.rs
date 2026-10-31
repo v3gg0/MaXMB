@@ -104,6 +104,7 @@ pub fn cleanup_temp_files(app: &tauri::AppHandle) {
     let mut files = Vec::new();
     temp_decodes(app, &mut files);
     files.push(crate::paths::icon_shades_temp_file(app));
+    files.push(crate::paths::wave_cache_temp_file(app));
     dir_files(&crate::paths::temp_dir(app).join("video"), &mut files);
     dir_files(&crate::paths::thumbs_dirs(app).temp, &mut files);
     for f in files { let _ = fs::remove_file(f); }
@@ -132,17 +133,22 @@ fn dir_files(dir: &Path, out: &mut Vec<PathBuf>) {
 ///   "covers"  — extracted song cover images
 ///   "icons"   — the icon shading
 ///   "videos"  — converted videos
+///   "thumbs"  — small copies of photos and covers
+///   "wave"    — the Original wave's prepared start (Wave Cache)
+///   "visualizers" — nothing on disk (the visualizers' data is only in memory)
 ///   "all"     — every category above
 /// The files are listed first, then deleted one by one, reporting progress.
 pub fn clear_cache(app: &tauri::AppHandle, category: &str, progress: &dyn Fn(usize, usize)) -> Result<(), String> {
     let mut files: Vec<PathBuf> = Vec::new();
     let all = category == "all";
-    if !matches!(category, "decoded" | "covers" | "icons" | "videos" | "thumbs" | "all") { return Err(format!("unknown cache category: {category}")); }
+    if !matches!(category, "decoded" | "covers" | "icons" | "videos" | "thumbs" | "wave" | "visualizers" | "all") { return Err(format!("unknown cache category: {category}")); }
     if all || category == "decoded" { temp_decodes(app, &mut files); dir_files(&crate::paths::preloaded_songs_dir(app), &mut files); }
     if all || category == "covers" { dir_files(&crate::paths::covers_dir(app), &mut files); }
     if all || category == "videos" { dir_files(&crate::paths::temp_dir(app).join("video"), &mut files); dir_files(&crate::paths::video_cache_app_dir(app), &mut files); }
     if all || category == "icons" { files.push(crate::paths::icon_shades_temp_file(app)); files.push(crate::paths::icon_shades_app_file(app)); }
     if all || category == "thumbs" { let d = crate::paths::thumbs_dirs(app); dir_files(&d.temp, &mut files); dir_files(&d.app, &mut files); }
+    if all || category == "wave" { files.push(crate::paths::wave_cache_temp_file(app)); files.push(crate::paths::wave_cache_app_file(app)); }
+    // ("visualizers": only in memory, freed by the page itself)
     let total = files.len();
     progress(0, total);
     for (i, f) in files.iter().enumerate() {

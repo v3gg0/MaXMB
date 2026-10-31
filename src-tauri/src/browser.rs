@@ -57,10 +57,13 @@ const CURF_GRAB: &[u8] = include_bytes!("../browser-ext/cursors/grab.cur");
 static CURSOR_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 const HELPER_EXT_ID: &str = "xmb-helper@ps3xmb.local";
-const UBO_ID: &str = "uBlock0@raymondhill.net";
-const UBO_XPI: &str = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi";
-const VM_ID: &str = "{aecec67f-0d10-4fa7-b7c7-609a2db280cf}";
-const VM_XPI: &str = "https://addons.mozilla.org/firefox/downloads/latest/violentmonkey/latest.xpi";
+// Add-ons older versions force-installed (uBlock Origin, Violentmonkey). They aren't any more:
+// their entries are taken out of policies.json, only when they're exactly the ones MaXMB
+// wrote (an entry of your own for them stays). Install them yourself if you want them.
+const OLD_FORCED: [(&str, &str); 2] = [
+    ("uBlock0@raymondhill.net", "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"),
+    ("{aecec67f-0d10-4fa7-b7c7-609a2db280cf}", "https://addons.mozilla.org/firefox/downloads/latest/violentmonkey/latest.xpi"),
+];
 const PORT: u16 = 48219;
 
 const UJS_BEGIN: &str = "// >>> XMB launcher (managed block: edits inside it are overwritten)";
@@ -137,6 +140,16 @@ static TAB_CODE_SET: AtomicBool = AtomicBool::new(false);
 /// The same key as a Windows virtual-key code, read directly while LibreWolf
 /// has focus (Tab = 0x09; 0 = none)
 static TAB_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x09);
+/// Keyboard keys that act as controller buttons while the browser has focus:
+/// (Windows virtual-key code, the XMB action it's bound to: "enter", "back",
+/// "options", "up", "ls_left"...). The keys' KeyboardEvent codes go to the
+/// helper so the page doesn't also take them (unless typing in a field).
+static PAD_KEYS: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+static PAD_CODES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The browser's full screen key (F11 = 0x7A by default; 0 = none). F11 itself
+/// is LibreWolf's own full screen key, so it's only read here when it's another
+static FS_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x7A);
+fn pad_codes() -> Vec<String> { PAD_CODES.lock().map(|c| c.clone()).unwrap_or_default() }
 fn tab_code() -> String {
     if !TAB_CODE_SET.load(Ordering::SeqCst) { return "Tab".into(); }
     TAB_CODE.lock().map(|c| c.clone()).unwrap_or_default()
@@ -333,6 +346,10 @@ fn merge_policies(existing: Option<&str>, entries: &[(String, Value)]) -> String
     }
     let es = es.as_object_mut().expect("object");
     es.retain(|k, _| !k.starts_with("xmb-user-")); // re-added below from the current files
+    for (id, url) in OLD_FORCED {
+        let ours = es.get(id).map(|v| v["installation_mode"] == "force_installed" && v["install_url"] == url).unwrap_or(false);
+        if ours { es.remove(id); }
+    }
     for (id, v) in entries {
         es.insert(id.clone(), v.clone());
     }
@@ -384,7 +401,16 @@ const USER_JS_BODY: &str = concat!(
     "user_pref(\"toolkit.legacyUserProfileCustomizations.stylesheets\", true);\n",
     // the XMB palm / fist / click cursors are bigger than 32 px: never block them
     "user_pref(\"layout.cursor.block.enabled\", false);\n",
-    "user_pref(\"layout.cursor.block.max-size\", 128);\n"
+    "user_pref(\"layout.cursor.block.max-size\", 128);\n",
+    // sign-ins stay: LibreWolf deletes cookies and site data when it closes (its
+    // "Clear history when LibreWolf closes"), so every site was signed out the
+    // next time the browser opened. Only those are kept; the history, cache and
+    // the rest are still cleared as LibreWolf is set to.
+    "user_pref(\"privacy.clearOnShutdown.cookies\", false);\n",
+    "user_pref(\"privacy.clearOnShutdown.offlineApps\", false);\n",
+    "user_pref(\"privacy.clearOnShutdown.sessions\", false);\n",
+    "user_pref(\"privacy.clearOnShutdown_v2.cookiesAndStorage\", false);\n",
+    "user_pref(\"network.cookie.lifetimePolicy\", 0);\n"
 );
 
 // Hide the toolbars ONLY in the window the helper marked as the XMB window.
@@ -413,8 +439,6 @@ fn ensure_setup(app: &AppHandle, bin: &Path, prof: &Path) -> Result<(), String> 
 
     // 2. policies.json next to the binary: MERGED, never overwritten
     let mut entries: Vec<(String, Value)> = vec![
-        (UBO_ID.into(), json!({ "installation_mode": "force_installed", "install_url": UBO_XPI })),
-        (VM_ID.into(), json!({ "installation_mode": "force_installed", "install_url": VM_XPI })),
         (HELPER_EXT_ID.into(), json!({
             "installation_mode": "force_installed",
             "install_url": file_url(&xpi),
@@ -707,7 +731,7 @@ fn handle_conn(mut s: std::net::TcpStream) -> std::io::Result<()> {
                         "mode": st.mode, "value": st.value,
                         "left": st.css.0.round(), "top": st.css.1.round(),
                         "width": st.css.2.round(), "height": st.css.3.round(),
-                        "tabKey": tab_code(),
+                        "tabKey": tab_code(), "padKeys": pad_codes(),
                     }))
                 } else {
                     None
@@ -722,7 +746,7 @@ fn handle_conn(mut s: std::net::TcpStream) -> std::io::Result<()> {
             let out = {
                 let mut st = sess();
                 let cmds = std::mem::take(&mut st.cmds);
-                json!({ "open": st.open, "cmds": cmds, "tabKey": tab_code() })
+                json!({ "open": st.open, "cmds": cmds, "tabKey": tab_code(), "padKeys": pad_codes() })
             };
             respond(&mut s, "200 OK", "application/json", &out.to_string())
         }
@@ -958,6 +982,8 @@ fn start_pad_thread(app: AppHandle, gen: u64) {
         let mut rep_at: [Option<Instant>; 5] = [None; 5];
         let mut btn_down = false;
         #[cfg(windows)]
+        let mut rbtn_down = false;
+        #[cfg(windows)]
         let mut esc_since: Option<Instant> = None;
         #[cfg(windows)]
         let mut esc_fired = false;
@@ -965,19 +991,23 @@ fn start_pad_thread(app: AppHandle, gen: u64) {
         let mut shot_key_was = false;
         #[cfg(windows)]
         let mut tab_key_was = false;
+        #[cfg(windows)]
+        let mut fs_key_was = false;
         // ○: a tap closes the window (on release), holding it ~0.6 s exits
         let mut circ_since: Option<Instant> = None;
         let mut circ_fired = false;
         let tick = Duration::from_millis(8);
         loop {
             std::thread::sleep(tick);
-            let (open, cur_gen, hwnd, hidden, rect, phase) = {
+            let (open, cur_gen, hwnd, hidden, rect, phase, typing) = {
                 let st = sess();
-                (st.open, st.gen, st.hwnd, st.hidden, page_rect(&st), st.phase.clone())
+                (st.open, st.gen, st.hwnd, st.hidden, page_rect(&st), st.phase.clone(), st.focus)
             };
             if !open || cur_gen != gen {
                 #[cfg(windows)]
                 if btn_down { win::mouse_button(false); }
+                #[cfg(windows)]
+                if rbtn_down { win::mouse_right(false); }
                 break;
             }
             // Keyboard exit: holding Esc for ~0.8 s while the page is showing
@@ -1014,17 +1044,68 @@ fn start_pad_thread(app: AppHandle, gen: u64) {
                     if st.open && st.gen == gen { st.cmds.push(json!({ "cmd": "nexttab", "value": null })); }
                 }
                 tab_key_was = tdown;
+                // the browser's full screen key, when it isn't F11 (LibreWolf's own)
+                let fvk = FS_VK.load(Ordering::SeqCst) as i32;
+                let fdown = fvk != 0 && fvk != 0x7A && hwnd != 0 && !hidden && !mods && win::foreground() == hwnd && win::key_down(fvk);
+                if fdown && !fs_key_was { toggle_fullscreen(gen); }
+                fs_key_was = fdown;
             }
-            let Some(p) = reader.poll() else {
-                prev = PadState::default();
-                circ_since = None; circ_fired = false;
-                continue;
+            // keyboard keys bound to controller buttons: while LibreWolf has
+            // focus they're the controller (not while typing in a page's field,
+            // nor with Ctrl / Alt held, so the browser's own shortcuts still work)
+            #[cfg(windows)]
+            let kb = {
+                let mut k = PadState::default();
+                let fg = hwnd != 0 && !hidden && win::foreground() == hwnd;
+                let keys = PAD_KEYS.lock().map(|k| k.clone()).unwrap_or_default();
+                // (a modifier bound as a button itself doesn't count as a shortcut)
+                let bound_mod = keys.iter().any(|e| matches!(e.0, 0x10 | 0x11 | 0x12 | 0xA0..=0xA5));
+                if fg && !typing && (bound_mod || (!win::key_down(0x11) && !win::key_down(0x12))) {
+                    for (vk, a) in keys.iter() {
+                        if !win::key_down(*vk as i32) { continue; }
+                        match a.as_str() {
+                            "enter" => k.buttons |= B_CROSS, "back" => k.buttons |= B_CIRCLE,
+                            "options" => k.buttons |= B_TRIANGLE, "square" => k.buttons |= B_SQUARE,
+                            "select" => k.buttons |= B_SELECT, "start" => k.buttons |= B_START,
+                            "l1" => k.buttons |= B_L1, "r1" => k.buttons |= B_R1,
+                            "l2" => k.buttons |= B_L2, "r2" => k.buttons |= B_R2,
+                            "l3" => k.buttons |= B_L3, "r3" => k.buttons |= B_R3,
+                            "up" => k.buttons |= B_UP, "down" => k.buttons |= B_DOWN,
+                            "left" => k.buttons |= B_LEFT, "right" => k.buttons |= B_RIGHT,
+                            "ls_up" => k.ly = -1.0, "ls_down" => k.ly = 1.0,
+                            "ls_left" => k.lx = -1.0, "ls_right" => k.lx = 1.0,
+                            _ => {}
+                        }
+                    }
+                }
+                k
             };
-            if !announced {
+            #[cfg(not(windows))]
+            let kb = { let _ = typing; PadState::default() };
+            let kb_on = kb.buttons != 0 || kb.lx != 0.0 || kb.ly != 0.0;
+            let polled = reader.poll();
+            let from_pad = polled.is_some();
+            // (no controller: the keyboard alone, or nothing; a key let go still
+            // counts as a release, as a button would)
+            let p = match polled {
+                Some(mut p) => {
+                    p.buttons |= kb.buttons;
+                    if kb.lx != 0.0 { p.lx = kb.lx; }
+                    if kb.ly != 0.0 { p.ly = kb.ly; }
+                    p
+                }
+                None if kb_on || prev.buttons != 0 => kb,
+                None => {
+                    prev = PadState::default();
+                    circ_since = None; circ_fired = false;
+                    continue;
+                }
+            };
+            if !announced && from_pad {
                 announced = true;
                 let _ = app.emit("xmb-pad", json!({ "native": true }));
             }
-            let emit = |a: &str| { let _ = app.emit("xmb-pad", json!({ "a": a })); };
+            let emit = |a: &str| { let _ = app.emit("xmb-pad", json!({ "a": a, "kb": !from_pad })); };
             let shot = || { let _ = app.emit("xmb-pad", json!({ "screenshot": true })); };
             let cmd = |c: &str| { let mut st = sess(); if st.open && st.gen == gen { st.cmds.push(json!({ "cmd": c, "value": null })); } };
             let pressed = |bit: u32| p.buttons & bit != 0 && prev.buttons & bit == 0;
@@ -1053,6 +1134,12 @@ fn start_pad_thread(app: AppHandle, gen: u64) {
                     circ_fired = false;
                 }
                 if pressed(B_START) { emit("start"); }               // enter an address
+                // △: the right mouse button (the page's own context menu), held as long as △ is
+                #[cfg(windows)]
+                {
+                    if pressed(B_TRIANGLE) && !rbtn_down { win::mouse_right(true); rbtn_down = true; }
+                    else if p.buttons & B_TRIANGLE == 0 && rbtn_down { win::mouse_right(false); rbtn_down = false; }
+                }
                 if pressed(B_L1) { cmd("back"); }
                 if pressed(B_L2) { cmd("prevtab"); }
                 if pressed(B_R2) { cmd("nexttab"); }
@@ -1193,17 +1280,21 @@ pub fn picker_pointer(app: &AppHandle) -> PickerPointer {
         let mut circle_armed = false;
         let mut circle_was = false;
         let mut centered = false;
+        #[cfg_attr(not(windows), allow(unused_mut, unused_variables))]
+        let mut fallback = false;
         let mut prev_buttons = 0u32;
         let mut first = true;
         let started = Instant::now();
         while !flag.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(8));
             #[cfg(windows)]
-            if !centered {
+            if !centered && started.elapsed() < Duration::from_secs(15) {
                 // the file / folder window, once it's up: put in the middle of
                 // the app's screen (Windows opens it at the top left), with the
                 // pointer shown in its middle; without one after 1.5 s, the
-                // pointer goes to the middle of the screen
+                // pointer goes to the middle of the screen meanwhile, and to the
+                // window's middle when it does open (it can take a while the
+                // first time: the pointer was left over the app, where it's hidden)
                 let dlg = win::own_dialog();
                 if dlg != 0 {
                     centered = true;
@@ -1211,8 +1302,8 @@ pub fn picker_pointer(app: &AppHandle) -> PickerPointer {
                         .and_then(|h| win::window_area(h.0 as isize)).unwrap_or_else(win::screen_rect);
                     win::center_window(dlg, area);
                     win::center_on_foreground();
-                } else if started.elapsed() >= Duration::from_millis(1500) {
-                    centered = true;
+                } else if !fallback && started.elapsed() >= Duration::from_millis(1500) {
+                    fallback = true;
                     win::center_on_foreground();
                 }
             }
@@ -1618,8 +1709,14 @@ pub fn browser_hwnd() -> isize {
 /// The key that takes a screenshot while the browser has focus (Windows
 /// virtual-key code; 0 = none).
 #[tauri::command(async)]
-pub fn browser_set_hotkeys(screenshot_vk: u32, tab_key: Option<String>, tab_vk: Option<u32>) {
+pub fn browser_set_hotkeys(screenshot_vk: u32, tab_key: Option<String>, tab_vk: Option<u32>,
+                           pad_keys: Option<Vec<(u32, String, String)>>, fs_vk: Option<u32>) {
     SHOT_VK.store(screenshot_vk, Ordering::SeqCst);
+    if let Some(v) = fs_vk { FS_VK.store(v, Ordering::SeqCst); }
+    if let Some(list) = pad_keys {
+        if let Ok(mut k) = PAD_KEYS.lock() { *k = list.iter().filter(|e| e.0 != 0).map(|e| (e.0, e.2.clone())).collect(); }
+        if let Ok(mut c) = PAD_CODES.lock() { *c = list.iter().map(|e| e.1.clone()).filter(|c| !c.is_empty()).collect(); }
+    }
     if let Some(v) = tab_vk { TAB_VK.store(v, Ordering::SeqCst); }
     if let Some(k) = tab_key {
         if let Ok(mut c) = TAB_CODE.lock() { *c = k; }
@@ -1705,6 +1802,8 @@ mod win {
     const MOUSEEVENTF_MOVE: u32 = 0x0001;
     const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
     const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+    const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
     const MOUSEEVENTF_WHEEL: u32 = 0x0800;
     const LR_LOADFROMFILE: u32 = 0x0010;
     const IMAGE_CURSOR: u32 = 2;
@@ -2094,6 +2193,9 @@ mod win {
     pub fn mouse_button(down: bool) {
         send_mouse(if down { MOUSEEVENTF_LEFTDOWN } else { MOUSEEVENTF_LEFTUP }, 0);
     }
+    pub fn mouse_right(down: bool) {
+        send_mouse(if down { MOUSEEVENTF_RIGHTDOWN } else { MOUSEEVENTF_RIGHTUP }, 0);
+    }
 
     // ---- system cursors + taskbar while browsing ---------------------------
     fn set_cursor(dir: &Path, file: &str, ids: &[u32]) {
@@ -2190,5 +2292,27 @@ mod win {
         unclip();
         unsafe { SystemParametersInfoW(SPI_SETCURSORS, 0, std::ptr::null_mut(), 0); }
         taskbars(true);
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    #[test]
+    fn old_forced_addons_are_taken_out_but_your_own_entries_stay() {
+        let old = r#"{"policies":{"ExtensionSettings":{
+            "uBlock0@raymondhill.net":{"installation_mode":"force_installed","install_url":"https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"},
+            "{aecec67f-0d10-4fa7-b7c7-609a2db280cf}":{"installation_mode":"normal_installed","install_url":"https://example.org/vm.xpi"},
+            "other@x":{"installation_mode":"allowed"}}}}"#;
+        let helper = vec![(HELPER_EXT_ID.to_string(), json!({ "installation_mode": "force_installed", "install_url": "file:///h.xpi" }))];
+        let v: Value = serde_json::from_str(&merge_policies(Some(old), &helper)).unwrap();
+        let es = v["policies"]["ExtensionSettings"].as_object().unwrap();
+        assert!(!es.contains_key("uBlock0@raymondhill.net"));               // MaXMB's own forced entry: gone
+        assert!(es.contains_key("{aecec67f-0d10-4fa7-b7c7-609a2db280cf}"));  // a different (user) entry: kept
+        assert!(es.contains_key("other@x"));
+        assert!(es.contains_key(HELPER_EXT_ID));
+        // a fresh file gets only the helper
+        let v: Value = serde_json::from_str(&merge_policies(None, &helper)).unwrap();
+        assert_eq!(v["policies"]["ExtensionSettings"].as_object().unwrap().len(), 1);
     }
 }

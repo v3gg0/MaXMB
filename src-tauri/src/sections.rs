@@ -108,6 +108,9 @@ fn find_asset(dir: &Path, stem: &str, exts: &[&str]) -> Option<String> {
 fn item_main(dir: &Path, json: Option<&Value>) -> Option<(PathBuf, &'static str)> {
     if let Some(f) = json.and_then(|j| j.get("file")).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
         let p = dir.join(f.trim());
+        // (the app's own shortcut to a file elsewhere, made from a folder added
+        // to the section: the file it points at)
+        let p = if ext_of(&p) == crate::medialib::LINK_EXT { crate::medialib::read_link(&p).unwrap_or(p) } else { p };
         let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         if p.is_file() { if let Some(k) = kind_of(&ext).filter(|k| *k != "app") { return Some((p, k)); } }
     }
@@ -131,8 +134,13 @@ fn walk(dir: &Path, group: &str, depth: u32, ctx: &Ctx, out: &mut Vec<SectionEnt
     let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
     dirs.sort();
     for d in dirs {
+        // (an item folder made from an added folder holds the app's shortcut to
+        // its file, which would otherwise make it look like a program's folder)
+        let linked_item = fs::read_to_string(d.join("item.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .filter(|j| j.get("file").and_then(|f| f.as_str()).map(|f| f.to_lowercase().ends_with(&format!(".{}", crate::medialib::LINK_EXT))).unwrap_or(false))
+            .and_then(|j| item_main(&d, Some(&j))).is_some();
         // a game folder
-        if crate::library::is_game_dir(&d) {
+        if !linked_item && crate::library::is_game_dir(&d) {
             // (a program or script, not a PS3 game: program.json, its Format PC)
             if crate::ps3::game_at(&d).is_none() { crate::library::section_program(&d); }
             if let Some(game) = crate::library::parse_game(&d, None, Some(ctx.icon_cache)) {
@@ -192,6 +200,164 @@ fn loose_count(dir: &Path) -> usize {
     }).count()
 }
 
+fn ext_of(p: &Path) -> String { p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default() }
+
+// ------------------------------------------------- folders added to a section
+//
+// A folder added to a section (or subsection) is read like a game source
+// folder: nothing is written in it. Each of its items gets an item folder of
+// its own in the section's folder (content\<Section>, or the subsection's),
+// with the app's shortcut to the file and an item.json (or, for a program,
+// a program.json), so it gets an icon, preview, background and music like the
+// rest. Each added folder has
+//   • its mode: "loose" (every file of the chosen kinds lying loose in it is
+//     an item) or "folders" (every subfolder in it is an item: its most likely
+//     file of the chosen kinds), and
+//   • its kinds: "music", "video", "photo" (pictures), "doc" (PDFs, comics)
+//     and "app" (programs and scripts).
+// What was made is kept in data\section_sources.json, so an item deleted by
+// hand isn't made again, and removing the folder removes its items.
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceOpts {
+    pub path: String,
+    /// the section's (or subsection's) folder the items are made in
+    pub dest: String,
+    pub mode: String,
+    pub kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceEntry { pub target: String, pub folder: String, pub source: String, pub dest: String }
+#[derive(Debug, Clone, Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SourceRecord { pub entries: Vec<SourceEntry> }
+
+fn load_src_record(f: &Path) -> SourceRecord { fs::read_to_string(f).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default() }
+fn save_src_record(f: &Path, r: &SourceRecord) { if let Ok(t) = serde_json::to_string_pretty(r) { let _ = fs::write(f, t); } }
+
+/// A file's kind for an added folder (pictures and documents apart).
+pub fn src_kind(ext: &str) -> Option<&'static str> {
+    if crate::media::VIDEO_EXTS.contains(&ext) { Some("video") }
+    else if crate::media::MUSIC_EXTS.contains(&ext) { Some("music") }
+    else if crate::media::PHOTO_EXTS.contains(&ext) { Some("photo") }
+    else if crate::media::DOC_EXTS.contains(&ext) { Some("doc") }
+    else if crate::media::APP_EXTS.contains(&ext) { Some("app") }
+    else { None }
+}
+fn is_asset(p: &Path) -> bool {
+    let stem = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    ASSET_STEMS.contains(&stem.as_str())
+}
+fn files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+    v.sort();
+    v
+}
+
+/// "folders": a subfolder's most likely file of the chosen kinds: its program
+/// first (the exe that starts it, as for games), then a video, a song, a
+/// document, a picture (inside it, up to two folders down).
+fn folder_main(d: &Path, kinds: &[String]) -> Option<PathBuf> {
+    let has = |k: &str| kinds.iter().any(|x| x == k);
+    if has("app") {
+        if let Some(exe) = crate::gamesrc::main_exe(d) { return Some(exe); }
+        if let Some(p) = files_in(d).into_iter().find(|p| src_kind(&ext_of(p)) == Some("app")) { return Some(p); }
+    }
+    fn deep(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+        let mut sub = Vec::new();
+        for p in files_in(dir) { out.push(p); }
+        for e in fs::read_dir(dir).into_iter().flatten().flatten() { if e.path().is_dir() { sub.push(e.path()); } }
+        sub.sort();
+        if depth < 2 { for s in sub { deep(&s, depth + 1, out); } }
+    }
+    let mut all = Vec::new();
+    deep(d, 0, &mut all);
+    for want in ["video", "music", "doc", "photo"] {
+        if !has(want) { continue; }
+        if let Some(p) = all.iter().find(|p| !is_asset(p) && src_kind(&ext_of(p)) == Some(want)) { return Some(p.clone()); }
+    }
+    None
+}
+
+/// The items an added folder holds now: (the file, its title).
+fn source_items(o: &SourceOpts) -> Vec<(PathBuf, String)> {
+    let src = Path::new(&o.path);
+    let has = |k: &str| o.kinds.iter().any(|x| x == k);
+    if o.mode == "folders" {
+        let mut dirs: Vec<PathBuf> = fs::read_dir(src).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        dirs.sort();
+        dirs.into_iter().filter_map(|d| {
+            let name = d.file_name()?.to_string_lossy().to_string();
+            if name.starts_with('.') { return None; }
+            folder_main(&d, &o.kinds).map(|f| (f, name))
+        }).collect()
+    } else {
+        files_in(src).into_iter().filter(|p| !is_asset(p) && src_kind(&ext_of(p)).map(has).unwrap_or(false))
+            .map(|p| { let t = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(); (p, t) })
+            .collect()
+    }
+}
+
+/// Make the item folders for the new items of the added folders. Returns how
+/// many were made. `content` is the content folder: items are only ever made
+/// inside it.
+pub fn sync_sources(srcs: &[SourceOpts], content: &Path, record_file: &Path) -> usize {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rec = load_src_record(record_file);
+    let mut made = 0;
+    for o in srcs {
+        let dest = PathBuf::from(&o.dest);
+        if !Path::new(&o.path).is_dir() || !dest.starts_with(content) || dest == content { continue; }
+        if fs::create_dir_all(&dest).is_err() { continue; }
+        for (file, title) in source_items(o) {
+            let target = file.display().to_string();
+            if rec.entries.iter().any(|e| e.target.eq_ignore_ascii_case(&target) && e.dest.eq_ignore_ascii_case(&o.dest)) { continue; }
+            let base = safe_name(&title);
+            let mut dir = dest.join(&base);
+            let mut n = 2;
+            while dir.exists() { dir = dest.join(format!("{base} ({n})")); n += 1; }
+            if fs::create_dir_all(&dir).is_err() { continue; }
+            let link = format!("{base}.{}", crate::medialib::LINK_EXT);
+            if crate::medialib::write_link(&dir.join(&link), &file).is_err() { let _ = fs::remove_dir_all(&dir); continue; }
+            let ok = if src_kind(&ext_of(&file)) == Some("app") {
+                // a program: started like the section's other programs
+                let j = serde_json::json!({ "title": title, "launch": link, "console": "PC" });
+                fs::write(dir.join(crate::library::PROGRAM_JSON), serde_json::to_string_pretty(&j).unwrap_or_default()).is_ok()
+            } else {
+                let j = serde_json::json!({ "title": title, "file": link });
+                fs::write(dir.join("item.json"), serde_json::to_string_pretty(&j).unwrap_or_default()).is_ok()
+            };
+            if !ok { let _ = fs::remove_dir_all(&dir); continue; }
+            rec.entries.push(SourceEntry { target, folder: dir.display().to_string(), source: o.path.clone(), dest: o.dest.clone() });
+            made += 1;
+        }
+    }
+    save_src_record(record_file, &rec);
+    made
+}
+
+/// An added folder was removed (or its mode or kinds changed): the item
+/// folders made from it are deleted (only inside the content folder) and
+/// forgotten. Returns how many were deleted.
+pub fn remove_source(source: &str, dest: &str, content: &Path, record_file: &Path) -> usize {
+    let mut rec = load_src_record(record_file);
+    let root = content.canonicalize().ok();
+    let mut n = 0;
+    rec.entries.retain(|e| {
+        if !(e.source.eq_ignore_ascii_case(source) && e.dest.eq_ignore_ascii_case(dest)) { return true; }
+        if let (Ok(t), Some(r)) = (Path::new(&e.folder).canonicalize(), root.as_ref()) {
+            if t.starts_with(r) && &t != r && fs::remove_dir_all(&t).is_ok() { n += 1; }
+        }
+        false
+    });
+    save_src_record(record_file, &rec);
+    n
+}
+
 /// A file / folder name made safe for Windows.
 pub fn safe_name(s: &str) -> String {
     let t: String = s.chars().map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { '_' } else { c }).collect();
@@ -202,6 +368,43 @@ pub fn safe_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn added_folders_make_items_in_the_section() {
+        let root = std::env::temp_dir().join("xmb_section_src");
+        let _ = fs::remove_dir_all(&root);
+        let (src, content) = (root.join("Downloads"), root.join("content"));
+        let dest = content.join("Stuff");
+        for d in ["Comic A", "Tool B/bin", "Album C"] { fs::create_dir_all(src.join(d)).unwrap(); }
+        fs::create_dir_all(&dest).unwrap();
+        for f in ["a.pdf", "b.cbz", "c.png", "d.mp3", "e.exe", "setup.exe", "f.bat"] { fs::write(src.join(f), b"x").unwrap(); }
+        fs::write(src.join("Comic A/book.cbz"), b"x").unwrap();
+        fs::write(src.join("Comic A/icon.png"), b"x").unwrap();
+        fs::write(src.join("Tool B/bin/tool.exe"), b"x").unwrap();
+        fs::write(src.join("Album C/01.mp3"), b"x").unwrap();
+        let rec = root.join("rec.json");
+        let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // loose: documents and pictures only
+        let o = SourceOpts { path: src.display().to_string(), dest: dest.display().to_string(), mode: "loose".into(), kinds: k(&["doc", "photo"]) };
+        assert_eq!(sync_sources(&[o.clone()], &content, &rec), 3);
+        assert_eq!(sync_sources(&[o.clone()], &content, &rec), 0);     // (made once)
+        let none = |_: &Path| (None, None);
+        let ctx = Ctx { icon_cache: &root, covers: &root, ffmpeg: None, video_icon: &none, wrap_in: None };
+        let v = list(&[dest.display().to_string()], &ctx);
+        assert_eq!(v.len(), 3);
+        assert!(v.iter().all(|e| e.kind == "photo" && e.media.as_ref().unwrap().path.starts_with(&src.display().to_string())), "{:?}", v.iter().map(|e| e.media.as_ref().unwrap().path.clone()).collect::<Vec<_>>());
+        // nothing is written in the added folder
+        assert!(!src.join("item.json").exists() && !src.join("Comic A/item.json").exists());
+        // removed: its items go
+        assert_eq!(remove_source(&o.path, &o.dest, &content, &rec), 3);
+        assert!(fs::read_dir(&dest).unwrap().next().is_none());
+        // folders: programs and documents
+        let o = SourceOpts { mode: "folders".into(), kinds: k(&["app", "doc"]), ..o };
+        assert_eq!(sync_sources(&[o.clone()], &content, &rec), 2);     // (Album C has neither)
+        let v = list(&[dest.display().to_string()], &ctx);
+        assert_eq!(v.iter().filter(|e| e.kind == "game").count(), 1);
+        assert_eq!(v.iter().filter(|e| e.kind == "photo").count(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
     #[test]
     fn items_need_their_own_folder() {
         let root = std::env::temp_dir().join("xmb_section_test");

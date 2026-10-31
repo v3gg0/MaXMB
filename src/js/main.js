@@ -17,15 +17,28 @@ import { preloadAppIcons } from "./iconshade.js";
 const manifest = await (await fetch("./assets/manifest.json")).json();
 await loadPsnAvatars(); // enumerate drop-in PSN avatars before the XMB uses them
 const audio = new AudioManager(manifest);
-const wave = new WaveBackground(document.getElementById("wave"));
+const settings = await call("get_settings");
+const appInfo = await call("app_info");
+// Graphics safety for the Original wave, kept in the settings for this computer
+// (not per user): "ok" once it ran well here, "trial" while it's being tried,
+// "failed" (with why) when it couldn't run: then linkev's wave is used
+const waveGuard = {
+  state: () => settings.graphics || {},
+  set: (st, reason) => {
+    const g = (settings.graphics ||= {});
+    if ((g.originalWave || "") === (st || "") && (g.reason || null) === (reason || null)) return;
+    if (st) g.originalWave = st; else delete g.originalWave;
+    if (reason) g.reason = reason; else delete g.reason;
+    call("save_settings", { settings }).catch(() => {});
+  },
+};
+// (it starts with the Wave Style last chosen here: xmb.js keeps it in settings.graphics.waveStyle)
+const wave = new WaveBackground(document.getElementById("wave"), { guard: waveGuard, style: settings.graphics?.waveStyle });
 // The intro and the log-in / user-select screen (before any profile's own theme
 // loads) use the default wave settings, so they match what a freshly-created
 // user gets.
 wave.resetWaveParams();
 const infobox = new InfoBox(document.getElementById("infobox"));
-
-const settings = await call("get_settings");
-const appInfo = await call("app_info");
 
 // apply system-wide volumes + brightness + time format from saved settings at boot
 audio.setMasterVolume((settings.behavior?.volume ?? 100) / 100);
@@ -92,6 +105,12 @@ window.addEventListener("focus", () => { audio.resumeFromBackground(); xmb.setLo
 // the page has lost the focus; see focus.rs)
 window.addEventListener("focus", () => call("page_focus", { focused: true }).catch(() => {}));
 window.addEventListener("blur", () => call("page_focus", { focused: false }).catch(() => {}));
+// (at the start, too: a window that opens without its page focused (another
+// program kept the focus) gets no focus / blur event, so the controller
+// wouldn't be read until a key was pressed; told now, the backend brings the
+// page into focus at the first controller press. Checked again a few times
+// while the system starts)
+for (const ms of [0, 1500, 4000, 8000]) setTimeout(() => { if (!document.hasFocus()) call("page_focus", { focused: false }).catch(() => {}); }, ms);
 document.addEventListener("visibilitychange", () => xmb.setLowPower(document.hidden ? 1 : 0));
 // art found online for newly recognized games (in the background): the Game
 // column shows it once the downloads settle
@@ -113,7 +132,30 @@ const appIconsReady = (async () => {
 function dispatch(a) {
   if (Input.picking || document.body.classList.contains("intro-hold") || document.body.classList.contains("hud-off")) return;
   xmb.onInput(a);
+  syncGlows();
 }
+// Glows run on one clock: every glowing pulse (a selected title, a focused
+// key or button, the glowing icons...) is set to have started at the same
+// moment, so moving to another item doesn't start its glow over: it carries
+// on from where every glow is. Checked after each button and on hovering.
+const GLOW_ANIMS = new Set(["xmbLabelGlow", "xmbLabelGlowF", "xmbCardNameGlow", "xmbPickGlow", "iconOutlineGlow", "iconGlowPulse", "colorGlowPulse",
+  "oskSel", "vbPulse", "vpThumbGlow", "swatchGlow", "secPulse", "gridHlGlow", "tfxFill", "tfxBtnFill"]);
+let _glowRaf = 0;
+function syncGlows() {
+  if (_glowRaf) return;
+  // (two frames on: the new item's style, and so its glow, is in place by then)
+  _glowRaf = requestAnimationFrame(() => requestAnimationFrame(() => {
+    _glowRaf = 0;
+    try {
+      for (const an of document.getAnimations()) {
+        if (!GLOW_ANIMS.has(an.animationName) || an.playState !== "running" || an.startTime === 0) continue;
+        an.startTime = 0;
+      }
+    } catch (e) {}
+  }));
+}
+window.__syncGlows = syncGlows;
+document.addEventListener("mouseover", syncGlows, { passive: true });
 function toggleHud() {
   if (document.body.classList.contains("intro-hold") || xmb.browserActive) return;
   document.body.classList.toggle("hud-off");
@@ -186,11 +228,14 @@ function bindAction(a, e) {
   // stays as it is) until it's pressed again
   if (a === "hud") { toggleHud(); return; }
   if (a === "brnexttab") { if (xmb.browserActive) xmb.browserButton("brnexttab"); return; }
+  if (a === "brfullscreen") { if (xmb.browserActive) xmb._browserCmd("fullscreen"); return; }
   if (a === "quit") { call("quit_app").catch(() => {}); return; }   // Close System (F4): no question asked
   dispatch(a);
 }
 window.addEventListener("keydown", (e) => {
   Input.lastKind = "keyboard";
+  // (a key held down repeating, not pressed again: lists speed up only then, see holdAccel)
+  window.__inputRepeat = !!e.repeat;
   // Change Keybinds: F11 always restores the default keys (can't be rebound)
   if (Keybinds.resetHook && e.code === "F11") { e.preventDefault(); e.stopPropagation(); Keybinds.resetHook(); return; }
   // the Change Keybinds menu is waiting for a key
@@ -215,6 +260,7 @@ window.addEventListener("wheel", (e) => {
   showCursor();
   if (document.body.classList.contains("hud-off")) return;
   if (wheelLock) return; wheelLock = true; setTimeout(() => (wheelLock = false), 90);
+  window.__inputRepeat = false;
   const dir = e.deltaY > 0 ? 1 : -1;
   // the Photo Viewer zooms with the wheel
   if (!e.shiftKey && xmb.overlay && xmb.overlay.onWheel && xmb.overlay.onWheel(dir)) { Input.lastKind = "mouse"; return; }
@@ -300,6 +346,11 @@ let _hadPad = null;
 // natively and forwards every press as an "xmb-pad" event (and drives the
 // pointer itself). Once that native feed is live, the webview's own gamepad
 // reading is ignored for the rest of the browser session (no double input).
+// After a game the backend asks whether the page is still running: it answers
+// at once (one that doesn't answer has stopped during the game and is made
+// anew, see focus.rs)
+listen("game-exited", () => { call("page_alive").catch(() => {}); });
+
 listen("xmb-pad", (p) => {
   if (!p) return;
   if (p.native) { xmb.nativePad = true; return; }
@@ -309,7 +360,8 @@ listen("xmb-pad", (p) => {
   if (p.rs) { if (xmb.browserActive && OnScreenKeyboard.active) OnScreenKeyboard.active.onRightStick(p.rs[0], p.rs[1]); return; }
   if (!p.a || !xmb.browserActive) return;
   if (p.rep && !OnScreenKeyboard.active) return;   // (held-button repeats: the on-screen keyboard only)
-  Input.lastKind = "controller";
+  // (kb: a keyboard key bound to that button, read while the browser had focus)
+  Input.lastKind = p.kb ? "keyboard" : "controller";
   dispatch(p.a);
 });
 // PlayStation controllers read natively by the backend (DualShock 3 / 4,
@@ -441,8 +493,8 @@ function readGamepad() {
     for (const k of ["up", "down", "left", "right"]) Input.held[k] = dir === k || !!kbHeld[k];
     const tnow = performance.now();
     if (dir) {
-      if (dir !== gp.dir) { gp.dir = dir; gpd(dir); gp.dirNext = tnow + 380; }   // initial delay
-      else if (tnow >= gp.dirNext) { gpd(dir); gp.dirNext = tnow + 130; }        // repeat rate
+      if (dir !== gp.dir) { gp.dir = dir; window.__inputRepeat = false; gpd(dir); gp.dirNext = tnow + 380; }   // initial delay
+      else if (tnow >= gp.dirNext) { window.__inputRepeat = true; gpd(dir); window.__inputRepeat = false; gp.dirNext = tnow + 130; }        // repeat rate
     } else { gp.dir = null; gp.dirNext = 0; }
     // Change Keybinds: SELECT + R2 restores the default keys
     if (Keybinds.resetHook) {

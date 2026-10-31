@@ -114,7 +114,7 @@ export function setActiveThemes(ps3, icons, custom) { p3t = ps3 || null; iconThe
 // (an Icon Theme's icons come first, then a Custom Theme's, then a PS3 theme's)
 export const activeThemes = () => [iconTheme, customTheme, p3t].filter(Boolean);
 
-const P3T_KEEP = new Set(["icon_music_album_default.png", "icon_photo_album_default.png", "icon_video_album_default.png",
+export const P3T_KEEP = new Set(["icon_music_album_default.png", "icon_photo_album_default.png", "icon_video_album_default.png",
   "icon_music_default.png", "icon_photo_default.png", "icon_video_default.png"]);
 /** The active themes' picture for an icon, if one replaces it: { url, key, opts }. */
 export function themeIcon(name) {
@@ -152,7 +152,6 @@ export const THEME_PARTS = [
 // Your own Theme Settings that can stay on with a theme ("Custom Settings" in
 // its menu). They start off, so the theme looks as it was made.
 export const THEME_OPTS = [
-  ["iconColor", "Icon Color", "On: the theme's icons are filled with your Icon Color, like the other icons. Off: they keep the theme's own colours."],
   ["iconStyle", "Icon Style", "On: your Icon Style's shading is drawn on the theme's icons. Off: they're shown flat, as they are in the theme."],
   ["waves", "Waves", "On: your waves are drawn over the theme. Off: no waves while this theme is on."],
   ["sparkles", "Sparkles", "On: your sparkles are drawn over the theme. Off: no sparkles while this theme is on."],

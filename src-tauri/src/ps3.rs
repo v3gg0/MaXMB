@@ -57,7 +57,7 @@ pub struct Ps3Game {
     pub in_rpcs3: bool,
 }
 
-fn child_ci(dir: &Path, name: &str) -> Option<PathBuf> {
+pub fn child_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     let p = dir.join(name);
     if p.exists() { return Some(p); }
     fs::read_dir(dir).ok()?.flatten().map(|e| e.path())
@@ -348,17 +348,38 @@ mod tests {
         assert!(dg.join("icon.png").exists() && dg.join("background.png").exists());
         let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(dg.join("game.json")).unwrap()).unwrap();
         assert_eq!(v["console"], "PS3");
-        assert_eq!(v["args"][0], "--no-gui");
+        // started by a shortcut in its folder, like RPCS3's own: RPCS3 without its window
+        let lnk = |d: &Path, v: &serde_json::Value| crate::gamesrc::parse_lnk(&fs::read(d.join(v["launch"].as_str().unwrap())).unwrap()).unwrap();
+        assert!(v["launch"].as_str().unwrap().ends_with(".lnk"));
+        let li = lnk(&dg, &v);
+        assert!(li.target.as_deref().unwrap().ends_with("rpcs3.exe"));
+        assert_eq!(li.work_dir.as_deref(), Some(root.display().to_string().as_str()));
+        let a = li.args.unwrap();
         // (a disc copy RPCS3 hasn't added to its list: its EBOOT.BIN)
-        assert!(v["args"][1].as_str().unwrap().ends_with("EBOOT.BIN"));
+        assert!(a.starts_with("--no-gui \"") && a.ends_with("EBOOT.BIN\""), "{a}");
+        assert_eq!(v["args"], serde_json::json!([]));
         // (installed in RPCS3's dev_hdd0 but not in its games.yml: its EBOOT.BIN too)
         let hv: serde_json::Value = serde_json::from_str(&fs::read_to_string(games.join("Hdd Game").join("game.json")).unwrap()).unwrap();
-        assert!(hv["args"][1].as_str().unwrap().ends_with("EBOOT.BIN"));
+        assert!(lnk(&games.join("Hdd Game"), &hv).args.unwrap().ends_with("EBOOT.BIN\""));
         // added to RPCS3's list (games.yml): the next look starts it by its Title ID
         fs::write(root.join("games.yml"), "BLES00002: games/Disc Game/\n").unwrap();
         let _ = crate::gamesrc::sync(&[root.display().to_string()], &games, &rec, None, &|_, _| {});
         let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(dg.join("game.json")).unwrap()).unwrap();
-        assert_eq!(v["args"][1], "%RPCS3_GAMEID%:BLES00002");
+        assert_eq!(lnk(&dg, &v).args.as_deref(), Some("--no-gui \"%RPCS3_GAMEID%:BLES00002\""));
+        assert_eq!(v["ps3Lnk"][1], "%RPCS3_GAMEID%:BLES00002");
+        // a game made by an older version (the app's link to RPCS3 and its
+        // arguments) gets a shortcut too
+        let old = games.join("Hdd Game");
+        for e in fs::read_dir(&old).unwrap().flatten() { if e.path().extension().map(|x| x == "lnk").unwrap_or(false) { fs::remove_file(e.path()).unwrap(); } }
+        crate::medialib::write_link(&old.join("Hdd Game.xmbl"), &root.join("rpcs3.exe")).unwrap();
+        let mut ov: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&fs::read_to_string(old.join("game.json")).unwrap()).unwrap();
+        ov.insert("launch".into(), "Hdd Game.xmbl".into()); ov.insert("args".into(), serde_json::json!(["--no-gui", "x"])); ov.remove("ps3Lnk");
+        fs::write(old.join("game.json"), serde_json::to_string(&ov).unwrap()).unwrap();
+        let _ = crate::gamesrc::sync(&[root.display().to_string()], &games, &rec, None, &|_, _| {});
+        let hv: serde_json::Value = serde_json::from_str(&fs::read_to_string(old.join("game.json")).unwrap()).unwrap();
+        assert!(hv["launch"].as_str().unwrap().ends_with(".lnk"), "{hv}");
+        assert!(!old.join("Hdd Game.xmbl").exists());
+        assert!(lnk(&old, &hv).args.unwrap().ends_with("EBOOT.BIN\""));
         // a second look adds nothing
         assert!(crate::gamesrc::sync(&[root.display().to_string()], &games, &rec, None, &|_, _| {}).iter()
             .all(|d| !d.file_name().unwrap().to_string_lossy().contains("Game")));

@@ -356,11 +356,13 @@ export class AudioManager {
   }
 
   // ---- game preview music (ducks the bg) ----
-  playPreview(url, volume = 0.5) {
+  // always: plays even with Background Music off (a game's own music is the
+  // game's, not the background music)
+  playPreview(url, volume = 0.5, always = false) {
     if (this._inGame || this.hold) return;
     this.previewVol = volume;
     this.stopPreview(true);
-    if (!url || !this.musicEnabled) return;
+    if (!url || (!this.musicEnabled && !always)) return;
     if (this.bg) this.bg.pause();          // duck the background
     const a = new Audio(url);
     a.loop = true; a.volume = volume * this.musicVol * this.master;
@@ -373,5 +375,5 @@ export class AudioManager {
   }
 
   /** Alias kept for callers that focus a game. */
-  playMusic(url, volume = 0.5) { this.playPreview(url, volume); }
+  playMusic(url, volume = 0.5, always = false) { this.playPreview(url, volume, always); }
 }

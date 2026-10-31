@@ -53,6 +53,19 @@ const TYPE_MODES = {
   game: ["all", "format", "album"],
 };
 const KIND_NAME = { music: "Music", photo: "Photo", video: "Video" };
+// Folders added to a section: how each is read (sec.folderOpts[path] =
+// { mode, kinds }): the kinds of files taken from it, and whether they lie
+// loose in it or each is in a folder of its own. Its items get an item folder
+// each in the section's folder (sections.rs sync_sources): nothing is written
+// in the folder itself. Folders added before this have no options and are
+// read as before.
+const SRC_MODES = [
+  ["loose", "By Files", "2 or more Files/Programs share a folder."],
+  ["folders", "By Folders", "Each compatible File/Program read in this folder is contained in its own folder."],
+];
+const SRC_KINDS = [
+  ["music", "Music"], ["video", "Videos"], ["photo", "Pictures"], ["doc", "Documents (PDFs and Comics)"], ["app", "Programs and Scripts"],
+];
 
 export const SectionMethods = {
   // each user has their own sections (older ones, kept for everyone in the
@@ -118,7 +131,9 @@ export const SectionMethods = {
   _secIcon(sec, path) {
     const fx = this._secFx(sec);
     const see = this._secAlpha(path);
-    const f = (fx.style ? "s" : "") + (fx.color && see ? "c" : "") + (fx.alpha ? "a" : "");
+    // (Theme Settings > Icon Color Off: every icon keeps its own colours, these too)
+    const colorOn = this.user?.theme?.iconColorAll !== false;
+    const f = (fx.style ? "s" : "") + (fx.color && see && colorOn ? "c" : "") + (fx.alpha ? "a" : "");
     return `cust:${f}:${assetUrl(path)}`;
   },
   // whether a picture has see-through parts (asked once, then remembered)
@@ -139,8 +154,44 @@ export const SectionMethods = {
     }).catch(() => {});
     return false;
   },
+  // a section's added folders with options, as sections.rs reads them
+  async _secSources(sec) {
+    const o = sec.folderOpts || {};
+    const paths = (sec.folders || []).filter((p) => o[p]);
+    if (!paths.length) return { list: [], dest: null };
+    let dest = null;
+    try { dest = await call("section_folder", { section: sec.name, sub: null }); } catch (e) {}
+    if (!dest) return { list: [], dest: null };
+    return { dest, list: paths.map((p) => ({ path: p, dest, mode: o[p].mode, kinds: o[p].kinds })) };
+  },
+  _secSrcSub(sec, p) {
+    const o = (sec.folderOpts || {})[p];
+    if (!o) return "";
+    const kinds = SRC_KINDS.filter(([k]) => o.kinds.includes(k)).map(([, l]) => l).join(", ");
+    return `${(SRC_MODES.find((m) => m[0] === o.mode) || SRC_MODES[0])[1]}: ${kinds}`;
+  },
+  // how an added folder is read: Loose Files or Folders, then which kinds
+  async _secAskSource(p, cur) {
+    const name = folderName(p);
+    const m = await this._askList(`${name}: How the Files/Programs are separated`, SRC_MODES.map(([id, label, sub]) => ({ id, label, sub })), "Next");
+    if (!m) return null;
+    const kinds = await new Promise((res) => {
+      this.overlay = this.listPicker;
+      this.listPicker.open({ title: `${name}: Kinds of Files`, multi: true, checked: cur ? cur.kinds : [],
+        items: SRC_KINDS.map(([id, label]) => ({ id, label })), submit: "Save" },
+        (ch) => { this.listPicker.close(); this.overlay = null; res(ch); },
+        () => { this.listPicker.close(); this.overlay = null; res(null); });
+    });
+    if (!kinds) return null;
+    if (!kinds.length) { this.audio.play("error", 0.5); this._shotFeedback("Choose at least one kind of files"); return null; }
+    return { mode: m.id, kinds: SRC_KINDS.map(([k]) => k).filter((k) => kinds.includes(k)) };
+  },
   async _sectionColumn(sec) {
-    const folders = await this._secFolders(sec);
+    // (the added folders' new items get their item folders first)
+    const srcs = await this._secSources(sec);
+    if (srcs.list.length) await call("section_sources_sync", { sources: srcs.list }).catch(() => 0);
+    let folders = (await this._secFolders(sec)).filter((p) => !(sec.folderOpts || {})[p]);
+    if (srcs.dest && !folders.includes(srcs.dest)) folders = [...folders, srcs.dest];
     // every first-layer subsection has its own folder, content\<Section>\<Subsection>
     // (made now if it isn't there): its files show inside the subsection
     const subDirs = await Promise.all((sec.subs || []).map((n) => (String(n.title || "").trim()
@@ -578,7 +629,7 @@ export const SectionMethods = {
   _secFxItems(id) {
     return [
       { kind: "setting", ctl: `secfx:color:${id}`, title: "Icon Color", icon: SI,
-        sub: "On: All icons in the section have the color selected on Theme Settings > Icon Color applied." },
+        sub: "On: All icons in the section have the color selected on Theme Settings > Icon Color Pick applied." },
       { kind: "setting", ctl: `secfx:style:${id}`, title: "Icon Style", icon: SI,
         sub: "On: All icons in the section have the style selected on Theme Settings > Icon Style applied." },
       { kind: "setting", ctl: `secfx:alpha:${id}`, title: "Transparency", icon: SI },
@@ -603,7 +654,8 @@ export const SectionMethods = {
     return [
       { kind: "action", act: `sec_fadd::${id}`, title: "Add Folder", icon: SI, sub: "Also read the items in another folder." },
       ...(s.folders || []).map((p, f) => ({ kind: "action", act: `sec_frm::${id}::${f}`, title: base(p), icon: SI,
-        sub: `${p}\nPress \u2715 to remove this folder from the section (its files aren't touched).` })),
+        sub: (s.folderOpts || {})[p] ? `${p}\n${this._secSrcSub(s, p)}. Press \u2715 to change how the files/programs are separated or to remove it (its files aren't touched).`
+          : `${p}\nPress \u2715 to remove this folder from the section (its files aren't touched).` })),
     ];
   },
   // a (sub)subsection by its path ("2" = the third subsection, "2/0/1" = …)
@@ -716,13 +768,41 @@ export const SectionMethods = {
       }
       case "sec_fadd": {
         const p = await this._askFolder(`${s.name}: Add a Folder`);
-        if (p && !(s.folders ||= []).includes(p)) { s.folders.push(p); this._persistUser(); }
+        if (!p) return;
+        if ((s.folders ||= []).includes(p)) { this.audio.play("error", 0.4); this._shotFeedback("This folder is already in the section"); return; }
+        // (the section's own folder is read as it is: its items are made there)
+        let own = null; try { own = await call("section_folder", { section: s.name, sub: null }); } catch (e) {}
+        if (own && own.toLowerCase() !== p.toLowerCase()) {
+          const o = await this._secAskSource(p);
+          if (!o) return;
+          (s.folderOpts ||= {})[p] = o;
+        }
+        s.folders.push(p); this._persistUser();
         this._secMenusRefresh(() => this._secFolderItems(id));
         return;
       }
       case "sec_frm": {
         const p = (s.folders || [])[+path]; if (!p) return;
+        const cur = (s.folderOpts || {})[p];
+        let own = null; try { own = await call("section_folder", { section: s.name, sub: null }); } catch (e) {}
+        const isOwn = own && own.toLowerCase() === p.toLowerCase();
+        const ch = isOwn ? { id: "remove" } : await this._askList(folderName(p), [
+          { id: "edit", label: "Change How the Files/Programs are separated" },
+          { id: "remove", label: "Remove Folder" },
+        ]);
+        if (!ch) return;
+        if (ch.id === "edit") {
+          const o = await this._secAskSource(p, cur);
+          if (!o || (cur && cur.mode === o.mode && cur.kinds.join() === o.kinds.join())) return;
+          // (read again: the items made from it before are made again)
+          if (cur && own) await call("section_sources_remove", { source: p, dest: own }).catch(() => 0);
+          (s.folderOpts ||= {})[p] = o; this._persistUser(); this.audio.play("enter", 0.5);
+          this._secMenusRefresh(() => this._secFolderItems(id));
+          return;
+        }
         if (!(await this._askConfirm(`Remove the ${p} folder from the section? (Its files aren't touched.)`))) return;
+        if (cur && own) await call("section_sources_remove", { source: p, dest: own }).catch(() => 0);
+        if (s.folderOpts) delete s.folderOpts[p];
         s.folders.splice(+path, 1); this._persistUser();
         this._secMenusRefresh(() => this._secFolderItems(id));
         return;

@@ -8,13 +8,14 @@
 // re-measures after the app re-renders (which rebuilds the elements' innards).
 
 const AUTO = [
-  ".lp-label",        // list-picker rows (bg music, playlists, add-to-playlist)
+  ".lp-label", ".lp-sub", // list-picker rows (bg music, playlists, add-to-playlist): name, artist / album
   ".mp2-title", ".mp2-artist", // music player now-playing
   ".mv-name",         // video viewer name
   ".vp-title",        // video player title (Display)
   ".mp-title",        // legacy music strip title
   ".osk-title",       // on-screen keyboard title
   ".br-name", ".br-url", // in-app browser: page title + address
+  ".br-status",       // in-app browser: the address of the link under the pointer
 ];
 
 const GAP = 64;   // px between the end of the text and its copy

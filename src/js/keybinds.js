@@ -30,6 +30,7 @@ export const ACTIONS = [
   { id: "screenshot", label: "Screenshot", pad: "R3" },
   { id: "hud", label: "Hide HUD", pad: "\u2014" },
   { id: "brnexttab", label: "Browser: Next Tab", pad: "R2" },
+  { id: "brfullscreen", label: "Browser: Full Screen", pad: "L3" },
   { id: "quit", label: "Close System", pad: "\u2014" },
 ];
 
@@ -44,6 +45,8 @@ export const DEFAULT_BINDS = {
   hud: ["F10", ""],
   // the Internet Browser: the next tab (left to right, then around)
   brnexttab: ["Tab", ""],
+  // the Internet Browser: full screen on / off (F11 is LibreWolf's own key for it)
+  brfullscreen: ["F11", ""],
   // closes the app at once (a safeguard if it slows down or gets stuck)
   quit: ["F4", ""],
 };
@@ -123,6 +126,10 @@ export function codeToVk(code) {
   if ((m = /^Numpad(\d)$/.exec(code))) return 0x60 + +m[1];
   const t = { PrintScreen: 0x2c, Insert: 0x2d, Delete: 0x2e, Home: 0x24, End: 0x23, PageUp: 0x21, PageDown: 0x22,
     Pause: 0x13, ScrollLock: 0x91, Space: 0x20, Tab: 0x09, Enter: 0x0d, Backspace: 0x08,
-    ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28 };
+    ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28, Escape: 0x1b, CapsLock: 0x14,
+    ShiftLeft: 0xa0, ShiftRight: 0xa1, ControlLeft: 0xa2, ControlRight: 0xa3, AltLeft: 0xa4, AltRight: 0xa5,
+    Minus: 0xbd, Equal: 0xbb, BracketLeft: 0xdb, BracketRight: 0xdd, Semicolon: 0xba, Quote: 0xde, Backquote: 0xc0,
+    Backslash: 0xdc, Comma: 0xbc, Period: 0xbe, Slash: 0xbf, NumpadEnter: 0x0d, NumpadAdd: 0x6b, NumpadSubtract: 0x6d,
+    NumpadMultiply: 0x6a, NumpadDivide: 0x6f, NumpadDecimal: 0x6e };
   return t[code] || 0;
 }

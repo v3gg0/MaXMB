@@ -55,6 +55,10 @@ pub fn video_icons_dir(app: &AppHandle) -> PathBuf { ensure(data_dir(app).join("
 pub fn icon_shades_app_file(app: &AppHandle) -> PathBuf { ensure(data_dir(app).join("cache")).join("icon_shades.json") }
 /// The same, in the temporary folder (the default).
 pub fn icon_shades_temp_file(app: &AppHandle) -> PathBuf { temp_dir(app).join("icon_shades.json") }
+/// The Original wave's prepared start (Wave Cache), in the system directory.
+pub fn wave_cache_app_file(app: &AppHandle) -> PathBuf { ensure(data_dir(app).join("cache")).join("wave_cache.json") }
+/// The same, in the temporary folder (the default).
+pub fn wave_cache_temp_file(app: &AppHandle) -> PathBuf { temp_dir(app).join("wave_cache.json") }
 
 /// Persistent folder (inside the app's own directory) for decoded song data,
 /// used when "Keep Preloaded Songs Data" is on so preloaded songs survive a

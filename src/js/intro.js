@@ -11,6 +11,7 @@
 //   4.1 - 5.2 s  the logo fades out (the PS mark and the "3" first)
 //   5.7 s        the brightest moment: about 2.6 x the menu's own brightness
 //   5.8 - 6.6 s  down to (just under) the menu's brightness
+// (MaXMB doesn't flash: both Wave Styles come up to the menu's colour and stay)
 //   7.4 s        the menu comes in (the clock and the icons, 0.4 s fade)
 //   7.7 s        the background settled at its normal brightness
 // Each curve below is the measured value at that moment (1 = as in the menu).
@@ -40,7 +41,6 @@ const WAVE = [[0, 0], [0.12, 0.03], [0.22, 0.12], [0.32, 0.24], [0.42, 0.32], [0
 const WAVE_SAT = [[0, 0], [0.5, 0], [1.2, 0.3], [1.9, 0.4], [2.4, 0.5], [3.2, 0.75], [4.4, 0.85], [5.8, 0.85], [6.6, 1]];
 const BG_SAT = [[0, 1], [4.0, 1], [4.6, 0.85], [5.8, 0.85], [6.6, 1]];
 const END = 7.73;
-const PEAK = 2.63;   // (the console's purple at its brightest)
 // the logo, part by part (opacity)
 const MARK_A = [[0, 0], [1.70, 0], [1.82, 0.04], [1.86, 0.05], [1.92, 0.1], [1.99, 0.17], [2.06, 0.26], [2.12, 0.34],
   [2.19, 0.39], [2.26, 0.42], [2.32, 0.45], [2.39, 0.49], [2.42, 0.52], [2.46, 0.6], [2.49, 0.68], [2.56, 0.82],
@@ -120,14 +120,14 @@ export function playIntro(audio, { enabled = true, bootSound = "coldboot", onSou
     const body = document.body;
     const layers = (ids) => ids.map((id) => document.getElementById(id)).filter(Boolean);
     const bgEls = layers(BG_LAYERS), waveEls = layers(WAVE_LAYERS);
-    // How far above normal it goes: on the console's dark purple, 2.63 x; a
-    // brighter background would turn white, so it goes only as far as its
-    // colour can before reaching white (a picture or a theme's background: as
-    // on the console)
-    let lit = 0.35;
-    try { const w = window.__wave, r = w && w.real; if (r && r.ok && !w.wallpaper && !r.wallpaper) lit = Math.max(...r.backgroundColor()); } catch (e) {}
-    const top = Math.max(1, Math.min(PEAK, 1 / Math.max(0.05, lit)));
-    const over = (v) => (v <= 1 ? v : 1 + (v - 1) * (top - 1) / (PEAK - 1));
+    // The background and the wave start dark and come up to their menu colour,
+    // then stay there (never brighter than in the menu, never dipping back down)
+    let hiB = 0, hiK = 0;
+    const lvl = (v, k) => {
+      v = Math.min(1, v);
+      if (k) return (hiK = Math.max(hiK, v));
+      return (hiB = Math.max(hiB, v));
+    };
     let done = false, resolved = false, raf = 0, t0 = 0;
     const timers = [];
 
@@ -143,7 +143,7 @@ export function playIntro(audio, { enabled = true, bootSound = "coldboot", onSou
     const frame = (now) => {
       if (done) return;
       const s = (now - t0) / 1000;
-      const B = over(at(BG, s)), K = Math.max(over(at(WAVE, s)), B);
+      const B = lvl(at(BG, s), false), K = Math.max(lvl(at(WAVE, s), true), B);
       setIntroBg(K > 0 ? B / K : 0);
       const fw = `brightness(${K.toFixed(3)}) saturate(${at(WAVE_SAT, s).toFixed(3)})`;
       const fb = `brightness(${B.toFixed(3)}) saturate(${at(BG_SAT, s).toFixed(3)})`;

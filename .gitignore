@@ -3,3 +3,10 @@ node_modules/
 /src-tauri/gen/
 dist/
 *.log
+# the PS3's own files (never published)
+/src-tauri/resources/ps3/*
+!/src-tauri/resources/ps3/README.txt
+# (an older place for them, never part of a build: the app reads only resources/ps3)
+/src/assets/wave/*.qrc
+/src/assets/wave/*.prx
+/src/assets/wave/*.sprx

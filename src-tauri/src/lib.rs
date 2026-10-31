@@ -30,6 +30,8 @@ mod themes;
 mod thumbs;
 mod p3t;
 mod users;
+#[cfg(test)]
+mod cache_tests;
 
 use models::{
     Game, LaunchResult, MediaItem, PsnAccount, PsnFile, Settings, User, UsersFile,
@@ -62,19 +64,29 @@ fn list_psn_avatars(app: AppHandle) -> serde_json::Value {
 
 // ----------------------------- library ------------------------------------
 
+/// The game source folders read as "Separate Apps" (settings.gameSourceModes:
+/// { "<folder>": "apps" }); the rest are "Games in Folders".
+fn app_sources(s: &models::Settings) -> Vec<String> {
+    s.extra.get("gameSourceModes").and_then(|v| v.as_object())
+        .map(|m| m.iter().filter(|(_, v)| v.as_str() == Some("apps")).map(|(k, _)| k.clone()).collect())
+        .unwrap_or_default()
+}
+
 #[tauri::command(async)]
 fn scan_library(app: AppHandle) -> Vec<Game> {
     let s = current_settings(&app);
     // games in the source folders: new ones get their folder first, so a game
     // added while the app runs shows when the Game column is next opened
     if !s.game_sources.is_empty() && sync_due("games") {
-        let made = gamesrc::sync(&s.game_sources, &paths::games_dir(&app), &paths::game_sources_file(&app), audio::ffmpeg_path(&app).as_deref(), &|_, _| {});
+        let made = gamesrc::sync_modes(&s.game_sources, &app_sources(&s), &paths::games_dir(&app), &paths::game_sources_file(&app), audio::ffmpeg_path(&app).as_deref(), &|_, _| {});
         queue_scrape(&app, made);
     }
     // PS3 games put into the Games folder by hand: their media and RPCS3
     if sync_due("ps3") {
         gamesrc::fill_ps3_folders(&paths::games_dir(&app), &paths::game_sources_file(&app), audio::ffmpeg_path(&app).as_deref());
     }
+    // shortcuts put loose into the Games folder get their own folder
+    library::wrap_loose_shortcuts(&paths::games_dir(&app));
     library::scan(&s.library_paths, Some(&paths::shortcut_icons_dir(&app)))
 }
 
@@ -109,7 +121,7 @@ fn game_delete(app: AppHandle, folder: String) -> Result<(), String> {
 #[tauri::command(async)]
 fn game_sources_sync(app: AppHandle) -> usize {
     let s = current_settings(&app);
-    let made = gamesrc::sync(&s.game_sources, &paths::games_dir(&app), &paths::game_sources_file(&app), audio::ffmpeg_path(&app).as_deref(), &progress_fn(&app, "games"));
+    let made = gamesrc::sync_modes(&s.game_sources, &app_sources(&s), &paths::games_dir(&app), &paths::game_sources_file(&app), audio::ffmpeg_path(&app).as_deref(), &progress_fn(&app, "games"));
     let n = made.len();
     // (with Automatic Scraping on, every recognized game the databases haven't
     // been asked about yet gets its art too, not only the new ones: a key
@@ -232,6 +244,85 @@ fn section_list(app: AppHandle, folders: Vec<String>) -> Vec<sections::SectionEn
     sections::list(&folders, &ctx)
 }
 
+/// Folders added to custom sections: the new items in them get their item
+/// folders in the section's folder (see sections::sync_sources). Returns how
+/// many were made.
+#[tauri::command(async)]
+fn section_sources_sync(app: AppHandle, sources: Vec<sections::SourceOpts>) -> usize {
+    let content = paths::content_root(&app);
+    sections::sync_sources(&sources, &content, &paths::data_dir(&app).join("section_sources.json"))
+}
+/// A folder removed from a section (or read differently now): the items made
+/// from it are deleted from the section's folder (the folder itself isn't touched).
+#[tauri::command(async)]
+fn section_sources_remove(app: AppHandle, source: String, dest: String) -> usize {
+    let content = paths::content_root(&app);
+    sections::remove_source(&source, &dest, &content, &paths::data_dir(&app).join("section_sources.json"))
+}
+
+/// The PS3's own files (lines.qrc, canyon.qrc, earth.qrc): put in
+/// src-tauri/resources/ps3 they're part of the build, like ffmpeg. Looked for in the app's resources, then next to the program.
+/// None: not there (only these names are answered).
+#[tauri::command]
+fn ps3_file(app: AppHandle, name: String) -> Option<String> {
+    let mut dirs = Vec::new();
+    if let Ok(res) = app.path().resource_dir() {
+        dirs.push(res.join("resources").join("ps3"));
+        dirs.push(res.join("ps3"));
+    }
+    if let Some(dir) = std::env::current_exe().ok().and_then(|c| c.parent().map(|p| p.to_path_buf())) {
+        dirs.push(dir.join("resources").join("ps3"));
+    }
+    // (running from source, not built: src-tauri/resources/ps3 itself, where
+    // they're put, so they're found without building again; src-tauri/ps3 too)
+    #[cfg(debug_assertions)]
+    {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        dirs.insert(0, src.join("resources").join("ps3"));
+        dirs.push(src.join("ps3"));
+    }
+    find_ps3_file(&dirs, &name)
+}
+/// The first of `dirs` that has the PS3 file `name` (only the known names).
+fn find_ps3_file(dirs: &[std::path::PathBuf], name: &str) -> Option<String> {
+    const KNOWN: [&str; 3] = ["lines.qrc", "canyon.qrc", "earth.qrc"];
+    if !KNOWN.contains(&name) {
+        return None;
+    }
+    dirs.iter().map(|d| d.join(name)).find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
+}
+#[cfg(test)]
+#[test]
+fn ps3_files_found_in_any_permutation() {
+    let root = std::env::temp_dir().join(format!("xmb_ps3files_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (a, b) = (root.join("res/resources/ps3"), root.join("exe/resources/ps3"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let dirs = vec![a.clone(), root.join("res/ps3"), b.clone()];
+    let names = ["lines.qrc", "canyon.qrc", "earth.qrc"];
+    // every combination of the three files, in either place
+    for mask in 0..8u32 {
+        for (i, n) in names.iter().enumerate() {
+            let _ = std::fs::remove_file(a.join(n));
+            let _ = std::fs::remove_file(b.join(n));
+            if mask & (1 << i) != 0 { std::fs::write(if i % 2 == 0 { a.join(n) } else { b.join(n) }, b"x").unwrap(); }
+        }
+        for (i, n) in names.iter().enumerate() {
+            let found = find_ps3_file(&dirs, n);
+            assert_eq!(found.is_some(), mask & (1 << i) != 0, "mask {mask} {n}");
+        }
+    }
+    // (only the PS3 files: nothing else is answered)
+    std::fs::write(a.join("other.txt"), b"x").unwrap();
+    assert!(find_ps3_file(&dirs, "other.txt").is_none());
+    assert!(find_ps3_file(&dirs, "../ps3/lines.qrc").is_none());
+    // (custom_render_plugin is no longer used)
+    std::fs::write(a.join("custom_render_plugin.prx"), b"x").unwrap();
+    assert!(find_ps3_file(&dirs, "custom_render_plugin.prx").is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Whether the System can save in its own folder (installed in Program Files,
 /// with the .msi, it can't): it keeps everything in its content folder.
 #[tauri::command(async)]
@@ -333,7 +424,7 @@ fn pick_file(app: AppHandle, title: String, name: String, exts: Vec<String>) -> 
 }
 
 #[tauri::command]
-fn launch_game(app: AppHandle, folder: String, launch: String, args: Vec<String>) -> LaunchResult {
+fn launch_game(app: AppHandle, folder: String, launch: String, args: Vec<String>, program: Option<bool>) -> LaunchResult {
     // the game's window may take the focus once it opens (the app keeps
     // showing black, silent, until then)
     #[cfg(windows)]
@@ -341,14 +432,23 @@ fn launch_game(app: AppHandle, folder: String, launch: String, args: Vec<String>
     let r = launcher::launch(&folder, &launch, &args);
     if r.ok {
         // game mode: the app idles until the game has ended, then comes back by itself
-        focus::watch_game(app, r.pid, launcher::watch_dir(&folder, &launch));
+        // (a game started through its launcher: followed by its own folder,
+        // and not by Battle.net, which keeps running after the game ends)
+        let meta: serde_json::Value = std::fs::read_to_string(std::path::Path::new(&folder).join("game.json")).ok()
+            .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let store = meta["store"].as_str().unwrap_or("");
+        let game_dir = meta["sourceDir"].as_str().map(std::path::PathBuf::from).filter(|d| !store.is_empty() && d.is_dir());
+        let pid = if store == "Battle.net" { None } else { r.pid };
+        // (a program from a custom section keeps the app's screen showing: the
+        // page is hidden only while a game runs)
+        focus::watch_game(app, pid, game_dir.or_else(|| launcher::watch_dir(&folder, &launch)), !program.unwrap_or(false));
     }
     r
 }
 
 /// The app is back from a game (the user returned to it some other way).
 #[tauri::command]
-fn game_mode_end() { focus::set_in_game(false); }
+fn game_mode_end(app: AppHandle) { focus::page_answered(); focus::set_in_game(false); focus::repair_window(&app); }
 
 // ------------------------------ users -------------------------------------
 
@@ -453,8 +553,11 @@ fn themes_custom(app: AppHandle) -> Vec<serde_json::Value> {
 /// Make a Custom Theme (.zip in the Themes folder) from the settings and the
 /// files they use: `files` maps the path in the zip to the file on disk.
 #[tauri::command(async)]
-fn custom_theme_create(app: AppHandle, name: String, settings: serde_json::Value, files: std::collections::HashMap<String, String>) -> Result<String, String> {
-    let list: Vec<(String, std::path::PathBuf)> = files.into_iter().map(|(k, v)| (k, std::path::PathBuf::from(v))).collect();
+/// `p3t`: the folder of the PS3 theme (unpacked) whose background / overlay it
+/// keeps, all of it going in the zip's p3t/ folder.
+fn custom_theme_create(app: AppHandle, name: String, settings: serde_json::Value, files: std::collections::HashMap<String, String>, p3t: Option<String>) -> Result<String, String> {
+    let mut list: Vec<(String, std::path::PathBuf)> = files.into_iter().map(|(k, v)| (k, std::path::PathBuf::from(v))).collect();
+    if let Some(d) = p3t { list.extend(themes::p3t_folder_files(std::path::Path::new(&d))); }
     themes::create_custom(&paths::themes_dir(&app), &name, &settings, &list).map(|p| p.display().to_string())
 }
 
@@ -624,7 +727,7 @@ pub(crate) fn active_photos_dir(app: &AppHandle) -> std::path::PathBuf {
 /// Load settings, always ensuring the in-app content folders are present so the
 /// launcher self-heals even if the file is old, partial, or had its paths lost.
 
-fn current_settings(app: &AppHandle) -> Settings {
+pub(crate) fn current_settings(app: &AppHandle) -> Settings {
     let mut s = settings::load(&paths::settings_file(app)).unwrap_or_default();
     let ensure = |list: &mut Vec<String>, dir: String| -> bool {
         if list.iter().any(|p| p == &dir) { false } else { list.push(dir); true }
@@ -646,7 +749,7 @@ fn apply_autostart(app: &AppHandle, enable: bool) {
     let _ = if enable { mgr.enable() } else { mgr.disable() };
 }
 
-fn apply_fullscreen(app: &AppHandle, enable: bool) {
+pub(crate) fn apply_fullscreen(app: &AppHandle, enable: bool) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_fullscreen(enable);
     }
@@ -714,8 +817,38 @@ fn icon_shades_save(app: AppHandle, data: String) -> Result<(), String> {
     Ok(())
 }
 
+// ------------------------------ wave cache --------------------------------
+// The Original wave's rope, run to its start state (a second of work at every
+// start), saved so the next start skips it. Kept like the icon shading: in the
+// temporary folder, or in the system directory with "Save Cache in System
+// Directory".
+
+fn wave_cache_file(app: &AppHandle) -> std::path::PathBuf {
+    if current_settings(app).behavior.cache_in_app_dir { paths::wave_cache_app_file(app) } else { paths::wave_cache_temp_file(app) }
+}
+fn wave_cache_other(app: &AppHandle, f: &std::path::Path) -> std::path::PathBuf {
+    if f == paths::wave_cache_app_file(app) { paths::wave_cache_temp_file(app) } else { paths::wave_cache_app_file(app) }
+}
+
+#[tauri::command(async)]
+fn wave_cache_load(app: AppHandle) -> String {
+    let main = wave_cache_file(&app);
+    // (the setting may have just been switched: the other place then)
+    std::fs::read_to_string(&main).or_else(|_| std::fs::read_to_string(wave_cache_other(&app, &main))).unwrap_or_else(|_| "{}".into())
+}
+
+#[tauri::command(async)]
+fn wave_cache_save(app: AppHandle, data: String) -> Result<(), String> {
+    let f = wave_cache_file(&app);
+    let tmp = f.with_extension("json.part");
+    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &f).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(wave_cache_other(&app, &f));
+    Ok(())
+}
+
 /// Clear a cache category on demand ("decoded" | "covers" | "icons" | "videos"
-/// | "thumbs" | "all"). (Covers and "all" read the song covers again at once.)
+/// | "thumbs" | "wave" | "visualizers" | "all"). (Covers and "all" read the song covers again at once.)
 #[tauri::command(async)]
 fn clear_cache(app: AppHandle, category: String) -> Result<(), String> {
     audio::clear_cache(&app, &category, &progress_fn(&app, &format!("cache:{category}")))?;
@@ -750,6 +883,40 @@ fn maybe_cleanup_temp(app: &AppHandle) {
 // on-screen keyboard. (See that module.)
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The app's window and its page (at the start, and again when the page has
+/// to be made anew after a game; see focus.rs).
+pub(crate) fn build_main_window(handle: &AppHandle) -> tauri::Result<()> {
+    // The main window is created here (not in tauri.conf.json) so the
+    // webview keeps its data in content/data/webview inside the app
+    // folder instead of AppData.
+    // sounds (the boot chime) may play before any click or key press.
+    // CalculateNativeWinOcclusion off: the page doesn't stop drawing when
+    // Windows reports its window as covered; after a full screen game that
+    // report could stay stuck, leaving the window invisible (see-through)
+    // and the page asleep once the game had closed. Losing the focus or
+    // being minimized still quiets the app (see main.js).
+    let mut args = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RestrictGamepadAccess,CalculateNativeWinOcclusion --autoplay-policy=no-user-gesture-required");
+    if !current_settings(handle).behavior.vsync {
+        // VSync off: don't tie frames to the display refresh
+        args.push_str(" --disable-gpu-vsync --disable-frame-rate-limit");
+    }
+    tauri::WebviewWindowBuilder::new(handle, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("MaXMB")
+        .inner_size(1280.0, 720.0)
+        .min_inner_size(960.0, 540.0)
+        .resizable(true)
+        .fullscreen(true)
+        .decorations(true)
+        .center()
+        .focused(true)
+        // (black behind the page: what shows while the page is hidden during a game)
+        .background_color(tauri::window::Color(0, 0, 0, 255))
+        .additional_browser_args(&args)
+        .data_directory(paths::webview_dir(handle))
+        .build()?;
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         // thumb://…/<path>: a picture's small copy for lists and grids (thumbs.rs),
@@ -797,27 +964,7 @@ pub fn run() {
             focus::start_pad_watch(handle.clone());
             // the Close System key (F4): closes the app at once, even if the page is stuck
             quitkey::start(handle.clone());
-            // The main window is created here (not in tauri.conf.json) so the
-            // webview keeps its data in content/data/webview inside the app
-            // folder instead of AppData.
-            // sounds (the boot chime) may play before any click or key press
-            let mut args = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RestrictGamepadAccess --autoplay-policy=no-user-gesture-required");
-            if !current_settings(handle).behavior.vsync {
-                // VSync off: don't tie frames to the display refresh
-                args.push_str(" --disable-gpu-vsync --disable-frame-rate-limit");
-            }
-            tauri::WebviewWindowBuilder::new(handle, "main", tauri::WebviewUrl::App("index.html".into()))
-                .title("MaXMB")
-                .inner_size(1280.0, 720.0)
-                .min_inner_size(960.0, 540.0)
-                .resizable(true)
-                .fullscreen(true)
-                .decorations(true)
-                .center()
-                .focused(true)
-                .additional_browser_args(&args)
-                .data_directory(paths::webview_dir(handle))
-                .build()?;
+            build_main_window(handle)?;
             // undo a browser session that didn't get cleaned up + daily LibreWolf update
             browser::on_app_start(handle);
             let s = current_settings(handle);
@@ -834,6 +981,8 @@ pub fn run() {
             // Whenever the window is (re)activated, hand focus to the webview so the
             // gamepad keeps polling while the app is the active window.
             if matches!(event, tauri::WindowEvent::Focused(true)) {
+                // (back in the window while a game runs: its hidden page shows again)
+                focus::window_focused(&window.app_handle());
                 if let Some(w) = window.get_webview_window("main") {
                     let _ = w.set_focus();
                 }
@@ -848,9 +997,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             log::log_write,
+            ps3_file,
             content_writable,
             scan_library,
             section_list,
+            section_sources_sync,
+            section_sources_remove,
             section_folder,
             section_delete_folder,
             game_meta_save,
@@ -863,7 +1015,7 @@ pub fn run() {
             game_sources_delete,
             game_sources_remove,
             pick_folder,
-            launch_game, game_mode_end, focus::page_focus, pick_file, image_has_alpha, game_media_set, game_scrape, game_scrape_waiting, game_scrape_queued,
+            launch_game, game_mode_end, focus::page_focus, focus::page_alive, pick_file, image_has_alpha, game_media_set, game_scrape, game_scrape_waiting, game_scrape_queued,
             list_users,
             create_user,
             save_user,
@@ -877,6 +1029,8 @@ pub fn run() {
             set_fullscreen,
             set_window_resolution,
             icon_shades_load,
+            wave_cache_load,
+            wave_cache_save,
             video::video_info,
             video::video_prepare,
             video::video_plan,
@@ -919,6 +1073,12 @@ pub fn run() {
             screenshot::browser_snapshot,
             list_psn_avatars,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running MaXMB");
+        .build(tauri::generate_context!())
+        .expect("error while running MaXMB")
+        .run(|_app, ev| {
+            // (the window closed only to be made anew: the app keeps running)
+            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = ev {
+                if focus::remaking() { api.prevent_exit(); }
+            }
+        });
 }

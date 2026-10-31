@@ -23,6 +23,9 @@ pub enum LaunchPlan {
     Url { url: String },
     /// A script run by its interpreter: `exe pre… script args…`.
     Script { exe: String, pre: Vec<String>, script: PathBuf, cwd: PathBuf },
+    /// A program started with its command line as it is (RPCS3 from the
+    /// shortcut MaXMB made for a PS3 game: its arguments exactly as written).
+    Raw { exe: PathBuf, args: String, cwd: PathBuf },
     /// Nothing to launch.
     Empty,
     /// A file target was named but doesn't exist on disk.
@@ -70,6 +73,13 @@ pub fn plan(folder: &str, launch: &str) -> LaunchPlan {
         }
         // Shortcuts and internet-shortcuts go through the shell so Windows
         // resolves the underlying target/args/workingdir for us.
+        // (a PS3 game's shortcut to RPCS3, made by MaXMB: RPCS3 started
+        // directly, as the shortcut says, so the game is followed while it runs
+        // and nothing depends on how Windows opens shortcuts)
+        "lnk" if rpcs3_link(&target).is_some() => {
+            let (exe, args, cwd) = rpcs3_link(&target).unwrap();
+            LaunchPlan::Raw { exe, args, cwd }
+        }
         "lnk" | "url" | "desktop" => LaunchPlan::Shell { target, cwd: dir.to_path_buf() },
         // scripts: run with their interpreter (a .ps1 would otherwise open in
         // Notepad); the rest go through the shell's own association
@@ -81,11 +91,20 @@ pub fn plan(folder: &str, launch: &str) -> LaunchPlan {
     }
 }
 
+/// A shortcut whose program is RPCS3: (RPCS3, its arguments, its working folder).
+fn rpcs3_link(lnk: &Path) -> Option<(PathBuf, String, PathBuf)> {
+    let info = crate::gamesrc::parse_lnk(&std::fs::read(lnk).ok()?)?;
+    let exe = PathBuf::from(info.target?);
+    if !exe.is_file() || !crate::ps3::is_rpcs3(&exe) { return None; }
+    let cwd = info.work_dir.map(PathBuf::from).filter(|d| d.is_dir()).or_else(|| exe.parent().map(|p| p.to_path_buf()))?;
+    Some((exe, info.args.unwrap_or_default(), cwd))
+}
+
 /// The folder a started game runs from (to know when it has ended): the
 /// exe's folder, or a shortcut's target folder. None for store links.
 pub fn watch_dir(folder: &str, launch: &str) -> Option<PathBuf> {
     match plan(folder, launch) {
-        LaunchPlan::Direct { exe, .. } => exe.parent().map(|p| p.to_path_buf()),
+        LaunchPlan::Direct { exe, .. } | LaunchPlan::Raw { exe, .. } => exe.parent().map(|p| p.to_path_buf()),
         LaunchPlan::Shell { target, .. } if ext_lower(&target) == "lnk" => {
             let info = crate::gamesrc::parse_lnk(&std::fs::read(&target).ok()?)?;
             let t = PathBuf::from(info.target?);
@@ -103,21 +122,47 @@ pub fn launch(folder: &str, launch_rel: &str, args: &[String]) -> LaunchResult {
         }
         LaunchPlan::Direct { exe, cwd } => {
             let mut cmd = Command::new(&exe);
+            normal_priority(&mut cmd);
             cmd.current_dir(&cwd);
             if !args.is_empty() {
                 cmd.args(args);
             }
             spawn(cmd)
         }
+        LaunchPlan::Raw { exe, args: line, cwd } => {
+            let mut cmd = Command::new(&exe);
+            normal_priority(&mut cmd);
+            cmd.current_dir(&cwd);
+            #[cfg(windows)]
+            { use std::os::windows::process::CommandExt; if !line.is_empty() { cmd.raw_arg(&line); } }
+            #[cfg(not(windows))]
+            { cmd.args(line.split_whitespace().map(|a| a.trim_matches('"'))); }
+            if !args.is_empty() { cmd.args(args); }
+            spawn(cmd)
+        }
         LaunchPlan::Shell { target, cwd } => shell_open(&target, Some(&cwd), args),
         LaunchPlan::Script { exe, pre, script, cwd } => {
             let mut cmd = Command::new(exe);
+            normal_priority(&mut cmd);
             cmd.current_dir(&cwd).args(pre).arg(script).args(args);
             spawn(cmd)
         }
         LaunchPlan::Url { url } => shell_open(Path::new(&url), None, args),
     }
 }
+
+/// A game always starts at the normal priority. (While a game or a program runs
+/// the app steps aside at a lower priority, and Windows would hand that lower
+/// priority down to whatever it starts meanwhile.)
+#[cfg(windows)]
+pub const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
+#[cfg(windows)]
+fn normal_priority(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(NORMAL_PRIORITY_CLASS);
+}
+#[cfg(not(windows))]
+fn normal_priority(_cmd: &mut Command) {}
 
 fn fail(msg: &str) -> LaunchResult {
     LaunchResult { ok: false, pid: None, message: msg.to_string() }
@@ -148,7 +193,7 @@ fn shell_open(target: &Path, cwd: Option<&Path>, args: &[String]) -> LaunchResul
     // `cmd /C start "" [/D dir] "target" [args...]` resolves .lnk/.url and
     // protocol strings, and start returns immediately (no blocking).
     let mut cmd = Command::new("cmd");
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS);
     cmd.args(["/C", "start", ""]);
     if let Some(dir) = cwd {
         cmd.arg("/D").arg(dir);
@@ -217,6 +262,31 @@ mod tests {
         assert!(matches!(plan(&d, "game.exe"), LaunchPlan::Direct { .. }));
         assert!(matches!(plan(&d, "game.lnk"), LaunchPlan::Shell { .. }));
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rpcs3_shortcut_starts_rpcs3_directly() {
+        let dir = std::env::temp_dir().join(format!("xmb_rpcs3_lnk_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let exe = dir.join("rpcs3.exe");
+        fs::write(&exe, b"x").unwrap();
+        let game = dir.join("PlayStation\u{00ae} All-Stars Battle Royale");
+        fs::create_dir_all(&game).unwrap();
+        let lnk = game.join("PlayStation\u{00ae} All-Stars Battle Royale.lnk");
+        crate::gamesrc::write_lnk(&lnk, &exe, "--no-gui \"%RPCS3_GAMEID%:BCUS98472\"", &dir, None, "PS All-Stars").unwrap();
+        match plan(&game.to_string_lossy(), "PlayStation\u{00ae} All-Stars Battle Royale.lnk") {
+            LaunchPlan::Raw { exe: e, args, cwd } => {
+                assert_eq!(e, exe);
+                assert_eq!(args, "--no-gui \"%RPCS3_GAMEID%:BCUS98472\"");
+                assert_eq!(cwd, dir);
+            }
+            other => panic!("expected Raw, got {other:?}"),
+        }
+        // (any other shortcut still goes through the shell)
+        let other = game.join("other.lnk");
+        crate::gamesrc::write_lnk(&other, &game.join("x.exe"), "", &dir, None, "x").unwrap();
+        assert!(matches!(plan(&game.to_string_lossy(), "other.lnk"), LaunchPlan::Shell { .. }));
         let _ = fs::remove_dir_all(&dir);
     }
 }

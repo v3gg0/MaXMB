@@ -41,6 +41,10 @@ What I mainly worked on:
 
 ---
 
+## Use
+
+If you want to use MaXMB, be sure to download the setup from **Releases** and to check out the **MaXMB Manual** for detailed setup instructions, controls, features and troubleshooting.
+
 ## Features
 
 **A faithful recreation**
@@ -64,10 +68,10 @@ What I mainly worked on:
 - Automatic game recognition from your folders, RPCS3 support (PS3 games start straight from the XMB), and art from SteamGridDB, TheGamesDB and RAWG using your own API keys.
 
 **Media players**
-- **Music Player:** With playlists, shuffle and repeat among other features.
+- **Music Player:** With playlists, shuffle and repeat among other features, and the Visual Player's visualizers (The Visualizer Wave, Canyon and Earth).
 - **Photo Viewer:** With zoom, rotation, trimming and slideshows. It also reads PDFs and comics page by page.
 - **Video Player:** With Scene Search, subtitles, instant replay, slow motion and custom video icons.
-- Pre-Loading of songs and videos for smooth playback.
+- **Pre-Loading** of songs and videos for smooth playback.
 
 **Web browsing inside the system**
 - An Internet Browser and Internet Search powered by LibreWolf, controlled entirely with a controller, with the On-Screen Keyboard for typing.
@@ -99,7 +103,8 @@ These are still to be added:
 
 ## Requirements
 
-- Windows 10 or 11.
+- **Windows 10 or 11.**
+- **RPCS3 and PS3UPDAT.PUP:** Needed to be able to use the original wave and the Music Player Visualizers.
 - **FFmpeg:** Needed for converting videos, video icons, songs and PS3 game previews and music.
 - **LibreWolf:** Needed for the Internet Browser, Internet Search and YouTube.
 
@@ -127,6 +132,7 @@ If you'd rather not use the installer, or want to test or change the system your
 | **Node.js** (LTS) | Runs the Tauri tools that build and start the system. | [nodejs.org](https://nodejs.org) |
 | **Microsoft Edge WebView2** | What the system is displayed with. Already part of Windows 10 (1803 and later) and 11. If it's missing, install the "Evergreen Bootstrapper". | [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) |
 
+- **RPCS3:** Take `canyon.qrc`, `earth.qrc` and `lines.qrc` from RPCS3's `dev_flash/vsh/resource/qgl` folder (Once the PS3 firmware is installed in it) and put them in `src-tauri/resources/ps3/` (They're then included in your builds). In an installed copy, they go in the `resources/ps3` folder inside MaXMB's folder.
 - **FFmpeg:** Put `ffmpeg.exe` in `src-tauri/resources/ffmpeg/` (It's then included in your builds), or have it on your PATH.
 - **LibreWolf:** Put the portable version in `content/Browser/LibreWolf/`, so `librewolf.exe` is in that folder.
 
@@ -167,7 +173,8 @@ Use the **.exe installer** (`nsis`) if possible to install the system. It instal
 
 | Project | Used for | License |
 |---|---|---|
-| [linkev/PlayStation-3-XMB](https://github.com/linkev/PlayStation-3-XMB) | The wave and sparkles (Adapted) | MIT, © 2025 Mart |
+| [sagemono/moyou](https://github.com/sagemono/moyou) | The Original wave and sparkles, reading the PS3's `.qrc`, `.mnu` and texture files, and the PS3 shader translator (Also used by the Music Player's Canyon visualizer) (Adapted) | MIT, © 2026 sagemono (`src/js/ps3wave/LICENSE-moyou.txt`) |
+| [linkev/PlayStation-3-XMB](https://github.com/linkev/PlayStation-3-XMB) | The linkev wave and sparkles (Adapted) | MIT, © 2025 Mart |
 | [Callum-Bell/DeckyXMB](https://github.com/Callum-Bell/DeckyXMB) | PS3 theme (`.p3t`) reading and animated theme backgrounds (Adapted) | BSD 3-Clause, © 2026 |
 | [PDF.js](https://github.com/mozilla/pdf.js) (Mozilla) | Reading PDFs | Apache 2.0 (`src/vendor/pdfjs-LICENSE.txt`) |
 | [fflate](https://github.com/101arrowz/fflate) | Reading comics and theme files | MIT, © 2026 Arjun Barrett (`src/vendor/fflate-LICENSE.txt`) |
@@ -195,10 +202,35 @@ Use the **.exe installer** (`nsis`) if possible to install the system. It instal
 - **PS4 Sounds:** The "PS4 Sounds" Sound Effect Set comes from the PS3 theme [Go-Tobun no Hanayome](http://www.ps3-themes.com/comics-anime/go-toubun-no-hanayome-slideshow.html) by [AnimugenZ](https://www.youtube.com/channel/UCkwbibnjwAFnQITFDALGcHg), from PS3-Themes.com.
 - **Startup sound reference:** [PlayStation 3 Startup Boot Sound Effect](https://www.youtube.com/watch?v=s3554Db2rrs) used as the boot sound effect and as the buffering sound.
 - **Font:** The XMB's font, "SCE-PS3 Rodin LATIN" (© 2006 Fontworks Japan, Inc.), taken from the PS3.
+- **Earth visualizer:** The atmosphere is drawn with Sean O'Neil's atmospheric scattering method ("Accurate Atmospheric Scattering", GPU Gems 2), set up with the PS3's own settings.
 - **Game art:** Downloaded through SteamGridDB, TheGamesDB and RAWG belongs to its authors and is subject to each site's terms. RAWG data and images are from [RAWG](https://rawg.io).
 
 <details>
 <summary><b>License texts</b></summary>
+
+**sagemono/moyou** (MIT License), adapted in `src/js/ps3wave/` (`formats.js`, `params.js`, `sim.js`, `particles.js`, `renderer.js`, `rsx.js`). The text is also in `src/js/ps3wave/LICENSE-moyou.txt`.
+
+```
+Copyright (c) 2026 sagemono
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 **linkev/PlayStation-3-XMB** (MIT License)
 
